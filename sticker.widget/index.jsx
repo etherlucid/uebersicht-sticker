@@ -1,4 +1,4 @@
-import { React } from 'uebersicht';
+import { React, run } from 'uebersicht';
 
 export const refreshFrequency = false;
 export const command = '';
@@ -162,7 +162,6 @@ export const initialState = {
   opacity: getInitialOpacity(),
   shadow: getInitialShadow(),
   enableSnapping: getInitialSnapping(),
-  contextMenu: null,
   isDragging: false,
   dragStartX: 0,
   dragStartY: 0,
@@ -176,7 +175,6 @@ export const updateState = (event, previousState) => {
   if (event.type === 'START_DRAG') {
     return {
       ...previousState,
-      contextMenu: null,
       isDragging: true,
       dragStartX: event.clientX,
       dragStartY: event.clientY,
@@ -326,21 +324,6 @@ export const updateState = (event, previousState) => {
       ...previousState,
       x: defaultX,
       y: defaultY,
-      contextMenu: null,
-    };
-  }
-
-  if (event.type === 'OPEN_CONTEXT_MENU') {
-    return {
-      ...previousState,
-      contextMenu: { x: event.x, y: event.y },
-    };
-  }
-
-  if (event.type === 'CLOSE_CONTEXT_MENU') {
-    return {
-      ...previousState,
-      contextMenu: null,
     };
   }
 
@@ -361,7 +344,6 @@ export const render = (state, dispatch) => {
     opacity,
     shadow,
     enableSnapping,
-    contextMenu,
     isDragging,
   } = currentState;
 
@@ -426,22 +408,6 @@ export const render = (state, dispatch) => {
     dispatch({ type: 'TOGGLE_FLIP' });
   };
 
-  const handleContextMenu = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const menuW = 195;
-    const menuH = 340;
-    const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
-    const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
-    const maxX = winW - menuW - 12;
-    const maxY = winH - menuH - 12;
-    dispatch({
-      type: 'OPEN_CONTEXT_MENU',
-      x: Math.max(12, Math.min(maxX, e.clientX)),
-      y: Math.max(12, Math.min(maxY, e.clientY)),
-    });
-  };
-
   const handleTogglePause = () => {
     if (!isPaused) {
       let frameData = null;
@@ -464,6 +430,49 @@ export const render = (state, dispatch) => {
     }
   };
 
+  const handleContextMenu = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const payload = JSON.stringify({
+      scale: scale || 1.0,
+      flipped: Boolean(flipped),
+      isPaused: Boolean(isPaused),
+      opacity: opacity !== undefined ? opacity : 1.0,
+      shadow: shadow !== false,
+      snapping: enableSnapping !== false,
+    });
+
+    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
+    const fallbackPath = './sticker.widget/menu_helper';
+    const escapedPayload = payload.replace(/'/g, "'\\''");
+    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+
+    run(cmd, (err, output) => {
+      if (err || !output) return;
+      try {
+        const res = JSON.parse(output.trim());
+        if (!res || !res.action) return;
+
+        if (res.action === 'SET_SCALE') {
+          dispatch({ type: 'SET_SCALE', scale: res.scale });
+        } else if (res.action === 'SET_FLIP') {
+          dispatch({ type: 'SET_FLIP', flipped: res.flipped });
+        } else if (res.action === 'TOGGLE_PAUSE') {
+          handleTogglePause();
+        } else if (res.action === 'SET_OPACITY') {
+          dispatch({ type: 'SET_OPACITY', opacity: res.opacity });
+        } else if (res.action === 'TOGGLE_SHADOW') {
+          dispatch({ type: 'TOGGLE_SHADOW' });
+        } else if (res.action === 'TOGGLE_SNAPPING') {
+          dispatch({ type: 'TOGGLE_SNAPPING' });
+        } else if (res.action === 'RESET_POSITION') {
+          dispatch({ type: 'RESET_POSITION' });
+        }
+      } catch (parseErr) {}
+    });
+  };
+
   const containerStyle = {
     position: 'absolute',
     top: `${y}px`,
@@ -479,21 +488,6 @@ export const render = (state, dispatch) => {
     filter: shadow ? 'drop-shadow(0 10px 22px rgba(0, 0, 0, 0.45))' : 'none',
     transition: isDragging ? 'none' : 'opacity 0.2s ease, filter 0.2s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
   };
-
-  const SCALE_OPTIONS = [
-    { label: '50%', value: 0.5 },
-    { label: '75%', value: 0.75 },
-    { label: '100%', value: 1.0 },
-    { label: '125%', value: 1.25 },
-    { label: '150%', value: 1.5 },
-  ];
-
-  const OPACITY_OPTIONS = [
-    { label: '100%', value: 1.0 },
-    { label: '80%', value: 0.8 },
-    { label: '60%', value: 0.6 },
-    { label: '40%', value: 0.4 },
-  ];
 
   return (
     <div className="sticker-root">
@@ -523,324 +517,11 @@ export const render = (state, dispatch) => {
           }}
         />
       </div>
-
-      {/* Context Menu Modal & Backdrop */}
-      {contextMenu && (
-        <>
-          <div
-            style={{
-              position: 'fixed',
-              top: 0,
-              left: 0,
-              width: '100vw',
-              height: '100vh',
-              zIndex: 9998,
-              background: 'transparent',
-            }}
-            onClick={(e) => {
-              e.stopPropagation();
-              dispatch({ type: 'CLOSE_CONTEXT_MENU' });
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              dispatch({ type: 'CLOSE_CONTEXT_MENU' });
-            }}
-          />
-
-          <div
-            className="sticker-ctx-menu"
-            style={{
-              position: 'fixed',
-              top: `${contextMenu.y}px`,
-              left: `${contextMenu.x}px`,
-              zIndex: 9999,
-              backgroundColor: 'rgba(24, 24, 28, 0.94)',
-              backdropFilter: 'blur(30px) saturate(200%)',
-              WebkitBackdropFilter: 'blur(30px) saturate(200%)',
-              border: '1px solid rgba(255, 255, 255, 0.14)',
-              borderRadius: '13px',
-              padding: '6px',
-              boxShadow: '0 14px 38px rgba(0, 0, 0, 0.7), 0 2px 8px rgba(0, 0, 0, 0.4)',
-              width: '185px',
-              color: '#ffffff',
-              userSelect: 'none',
-              WebkitUserSelect: 'none',
-            }}
-            onClick={(e) => e.stopPropagation()}
-            onContextMenu={(e) => e.preventDefault()}
-          >
-            {/* Header */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '4px 8px 6px 8px',
-                borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-                marginBottom: '5px',
-              }}
-            >
-              <span style={{ fontSize: '12px' }}>🕷️</span>
-              <span
-                style={{
-                  fontSize: '10px',
-                  fontWeight: '700',
-                  color: 'rgba(255, 255, 255, 0.75)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.6px',
-                }}
-              >
-                Spider-Man Sticker
-              </span>
-            </div>
-
-            {/* Size Section */}
-            <div style={sectionHeaderStyle}>Size</div>
-            <div style={pillRowStyle}>
-              {SCALE_OPTIONS.map((opt) => {
-                const isSelected = Math.abs(scale - opt.value) < 0.01;
-                return (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    className="sticker-pill-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      dispatch({ type: 'SET_SCALE', scale: opt.value });
-                    }}
-                    style={{
-                      ...pillBtnStyle,
-                      backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.06)',
-                      fontWeight: isSelected ? '600' : '400',
-                      color: isSelected ? '#FFFFFF' : 'rgba(255, 255, 255, 0.75)',
-                    }}
-                  >
-                    {opt.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Direction Section */}
-            <div style={{ ...sectionHeaderStyle, marginTop: '5px' }}>Facing</div>
-            <div style={pillRowStyle}>
-              <button
-                type="button"
-                className="sticker-pill-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  dispatch({ type: 'SET_FLIP', flipped: true });
-                }}
-                style={{
-                  ...pillBtnStyle,
-                  flex: 1,
-                  backgroundColor: flipped ? 'rgba(255, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.06)',
-                  fontWeight: flipped ? '600' : '400',
-                  color: flipped ? '#FFFFFF' : 'rgba(255, 255, 255, 0.75)',
-                }}
-              >
-                ◀ Left
-              </button>
-              <button
-                type="button"
-                className="sticker-pill-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  dispatch({ type: 'SET_FLIP', flipped: false });
-                }}
-                style={{
-                  ...pillBtnStyle,
-                  flex: 1,
-                  backgroundColor: !flipped ? 'rgba(255, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.06)',
-                  fontWeight: !flipped ? '600' : '400',
-                  color: !flipped ? '#FFFFFF' : 'rgba(255, 255, 255, 0.75)',
-                }}
-              >
-                Right ▶
-              </button>
-            </div>
-
-            {/* Animation Toggle */}
-            <div
-              className="sticker-ctx-item"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleTogglePause();
-              }}
-              style={{
-                ...menuItemStyle,
-                marginTop: '6px',
-                backgroundColor: isPaused ? 'rgba(255, 179, 0, 0.15)' : 'transparent',
-              }}
-            >
-              <span style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
-                <span style={{ fontSize: '11px' }}>{isPaused ? '▶' : '⏸'}</span>
-                <span>{isPaused ? 'Resume Animation' : 'Pause Animation'}</span>
-              </span>
-              <span style={{ fontSize: '10px', color: 'rgba(255, 255, 255, 0.5)' }}>
-                {isPaused ? 'Paused' : 'Playing'}
-              </span>
-            </div>
-
-            {/* Opacity Section */}
-            <div style={{ ...sectionHeaderStyle, marginTop: '6px' }}>Opacity</div>
-            <div style={pillRowStyle}>
-              {OPACITY_OPTIONS.map((opt) => {
-                const isSelected = Math.abs(opacity - opt.value) < 0.01;
-                return (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    className="sticker-pill-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      dispatch({ type: 'SET_OPACITY', opacity: opt.value });
-                    }}
-                    style={{
-                      ...pillBtnStyle,
-                      backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.22)' : 'rgba(255, 255, 255, 0.06)',
-                      fontWeight: isSelected ? '600' : '400',
-                      color: isSelected ? '#FFFFFF' : 'rgba(255, 255, 255, 0.75)',
-                    }}
-                  >
-                    {opt.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Toggles Divider */}
-            <div style={{ height: '1px', background: 'rgba(255, 255, 255, 0.08)', margin: '6px 0 4px 0' }} />
-
-            {/* Drop Shadow Toggle */}
-            <div
-              className="sticker-ctx-item"
-              onClick={(e) => {
-                e.stopPropagation();
-                dispatch({ type: 'TOGGLE_SHADOW' });
-              }}
-              style={menuItemStyle}
-            >
-              <span>Ambient Shadow</span>
-              {shadow && <CheckmarkIcon />}
-            </div>
-
-            {/* Edge Snapping Toggle */}
-            <div
-              className="sticker-ctx-item"
-              onClick={(e) => {
-                e.stopPropagation();
-                dispatch({ type: 'TOGGLE_SNAPPING' });
-              }}
-              style={menuItemStyle}
-            >
-              <span>Edge Snapping</span>
-              {enableSnapping && <CheckmarkIcon />}
-            </div>
-
-            {/* Reset Action */}
-            <div
-              className="sticker-ctx-item sticker-ctx-action"
-              onClick={(e) => {
-                e.stopPropagation();
-                dispatch({ type: 'RESET_POSITION' });
-              }}
-              style={{
-                ...menuItemStyle,
-                marginTop: '4px',
-                borderTop: '1px solid rgba(255, 255, 255, 0.08)',
-                color: 'rgba(255, 255, 255, 0.7)',
-              }}
-            >
-              <span>Reset Position</span>
-              <span style={{ fontSize: '11px', opacity: 0.6 }}>↺</span>
-            </div>
-          </div>
-        </>
-      )}
     </div>
   );
-};
-
-const CheckmarkIcon = () => (
-  <svg
-    width="12"
-    height="12"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="#FFFFFF"
-    strokeWidth="2.5"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-  >
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
-
-const sectionHeaderStyle = {
-  fontSize: '9px',
-  fontWeight: '700',
-  color: 'rgba(255, 255, 255, 0.45)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.6px',
-  padding: '2px 4px 3px 4px',
-};
-
-const pillRowStyle = {
-  display: 'flex',
-  gap: '3px',
-  marginBottom: '2px',
-};
-
-const pillBtnStyle = {
-  flex: 1,
-  padding: '4px 0',
-  border: 'none',
-  borderRadius: '6px',
-  fontSize: '10.5px',
-  cursor: 'pointer',
-  outline: 'none',
-  textAlign: 'center',
-  transition: 'background-color 0.12s ease, transform 0.08s ease',
-};
-
-const menuItemStyle = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  padding: '5px 8px',
-  borderRadius: '7px',
-  fontSize: '11.5px',
-  color: 'rgba(255, 255, 255, 0.88)',
-  cursor: 'pointer',
-  margin: '1px 0',
 };
 
 export const className = `
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: #ffffff;
-
-  .sticker-pill-btn:hover {
-    background-color: rgba(255, 255, 255, 0.3) !important;
-    color: #ffffff !important;
-  }
-  .sticker-pill-btn:active {
-    transform: scale(0.95);
-  }
-
-  .sticker-ctx-item {
-    transition: background-color 0.1s ease, color 0.1s ease;
-  }
-  .sticker-ctx-item:hover {
-    background-color: rgba(255, 255, 255, 0.18) !important;
-    color: #ffffff !important;
-  }
-  .sticker-ctx-item:active {
-    background-color: rgba(255, 255, 255, 0.25) !important;
-  }
-
-  .sticker-ctx-action:hover {
-    color: #ffb7b7 !important;
-  }
 `;
