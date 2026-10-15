@@ -42,12 +42,6 @@ let delegate = MenuDelegate()
 let menu = NSMenu(title: "Spider-Man Controls")
 menu.autoenablesItems = false
 
-// Header Item
-let header = NSMenuItem(title: "🕷️ Spider-Man Sticker", action: nil, keyEquivalent: "")
-header.isEnabled = false
-menu.addItem(header)
-menu.addItem(NSMenuItem.separator())
-
 // Size Submenu
 let sizeParent = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
 let sizeMenu = NSMenu(title: "Size")
