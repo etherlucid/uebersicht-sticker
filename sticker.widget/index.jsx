@@ -3,8 +3,8 @@ import { React } from 'uebersicht';
 export const refreshFrequency = false;
 export const command = '';
 
-const BASE_WIDTH = 262;
-const BASE_HEIGHT = 200;
+const BASE_WIDTH = 215;
+const BASE_HEIGHT = 146;
 
 const STORAGE_POS_KEY = 'sticker_widget_position';
 const STORAGE_SCALE_KEY = 'sticker_widget_scale';
