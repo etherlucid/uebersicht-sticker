@@ -7,6 +7,8 @@ struct MenuState: Codable {
     var currentSticker: String?    // relative path e.g. "sticker.widget/stickers/cat.webp" or nil
     var scale: Double?
     var flipped: Bool?
+    var isPaused: Bool?
+    var audioSync: Bool?
     var opacity: Double?
     var shadow: Bool?
     var enableSnapping: Bool?
@@ -290,6 +292,24 @@ if hasSticker {
     }
     opParent.submenu = opMenu
     menu.addItem(opParent)
+
+    menu.addItem(NSMenuItem.separator())
+
+    // Animation Pause / Resume
+    let isPaused = state.isPaused ?? false
+    let animTitle = isPaused ? "▶ Resume Animation" : "⏸ Pause Animation"
+    let animItem = NSMenuItem(title: animTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    animItem.target = delegate
+    animItem.representedObject = "{\"action\":\"TOGGLE_PAUSE\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(animItem)
+
+    // Audio Stream Animation Playback Toggle
+    let hasAudioSync = state.audioSync ?? false
+    let syncItem = NSMenuItem(title: "🎵 Sync with Audio Stream", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    syncItem.target = delegate
+    syncItem.representedObject = "{\"action\":\"TOGGLE_AUDIO_SYNC\",\"instanceId\":\"\(instanceId)\"}"
+    if hasAudioSync { syncItem.state = .on }
+    menu.addItem(syncItem)
 }
 
 menu.addItem(NSMenuItem.separator())

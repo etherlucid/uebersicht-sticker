@@ -10,6 +10,7 @@ const STORAGE_INSTANCES_KEY = 'sticker_widget_instances';
 const STORAGE_OPACITY_KEY = 'sticker_widget_opacity';
 const STORAGE_SHADOW_KEY = 'sticker_widget_shadow';
 const STORAGE_SNAP_KEY = 'sticker_widget_snapping';
+const STORAGE_AUDIO_SYNC_KEY = 'sticker_widget_audio_sync';
 
 const WIDGET_ORDER_KEY = 'uebersicht_widget_order';
 const DEFAULT_WIDGET_ORDER = ['sticker', 'cava', 'shell', 'nowplaying'];
@@ -73,7 +74,57 @@ const SNAP_MARGIN_TOP = 14;
 const SNAP_MARGIN_BOTTOM = 14;
 
 let lastClickTimestamp = 0;
+let audioTimer = null;
+let isCheckingAudio = false;
 let currentDispatch = null;
+let currentWidgetState = null;
+
+const checkAudio = () => {
+  if (isCheckingAudio) return;
+  if (!currentWidgetState || !currentWidgetState.audioSync || !currentDispatch) return;
+
+  isCheckingAudio = true;
+  const audioCheckPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/audio_check';
+  const fallbackPath = './sticker.widget/audio_check';
+  const cmd = `"${audioCheckPath}" 2>/dev/null || "${fallbackPath}" 2>/dev/null`;
+
+  run(cmd, (err, output) => {
+    isCheckingAudio = false;
+    if (err || !output) return;
+    const isPlaying = output.trim() === '1';
+    const state = currentWidgetState;
+    if (!state || !state.audioSync) return;
+
+    const instances = state.instances || [];
+    if (isPlaying) {
+      const anyPaused = instances.some((inst) => inst.sticker && inst.isPaused);
+      if (anyPaused) {
+        currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: true });
+      }
+    } else {
+      const anyPlaying = instances.some((inst) => inst.sticker && !inst.isPaused);
+      if (anyPlaying) {
+        const frames = {};
+        instances.forEach((inst) => {
+          if (inst.sticker && !inst.isPaused) {
+            try {
+              const img = document.getElementById(`sticker-img-${inst.id}`);
+              if (img) {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth || img.width || BASE_SIZE;
+                canvas.height = img.naturalHeight || img.height || BASE_SIZE;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                frames[inst.id] = canvas.toDataURL('image/png');
+              }
+            } catch (e) {}
+          }
+        });
+        currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: false, frames });
+      }
+    }
+  });
+};
 
 const getScreenId = () => {
   if (typeof window !== 'undefined' && window.location && window.location.pathname) {
@@ -147,6 +198,8 @@ const getInitialInstances = () => {
     y: defaultPos.y,
     scale: 1.0,
     flipped: false,
+    isPaused: false,
+    pausedFrame: null,
     w: BASE_SIZE,
     h: BASE_SIZE,
   }];
@@ -157,7 +210,13 @@ const saveInstances = (instances) => {
   try {
     localStorage.setItem(`${STORAGE_INSTANCES_KEY}_${screenId}`, JSON.stringify(instances));
     localStorage.setItem(STORAGE_INSTANCES_KEY, JSON.stringify(instances));
-  } catch (e) {}
+  } catch (e) {
+    try {
+      const stripped = instances.map(({ pausedFrame, ...rest }) => rest);
+      localStorage.setItem(`${STORAGE_INSTANCES_KEY}_${screenId}`, JSON.stringify(stripped));
+      localStorage.setItem(STORAGE_INSTANCES_KEY, JSON.stringify(stripped));
+    } catch (e2) {}
+  }
 };
 
 const getInitialOpacity = () => {
@@ -190,6 +249,14 @@ const getInitialSnapping = () => {
   return true;
 };
 
+const getInitialAudioSync = () => {
+  try {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_AUDIO_SYNC_KEY) : null;
+    if (saved !== null) return saved === 'true';
+  } catch (e) {}
+  return false;
+};
+
 const initialInstances = getInitialInstances();
 
 export const initialState = {
@@ -197,6 +264,7 @@ export const initialState = {
   opacity: getInitialOpacity(),
   shadow: getInitialShadow(),
   enableSnapping: getInitialSnapping(),
+  audioSync: getInitialAudioSync(),
   isDragging: false,
   draggingInstanceId: null,
   dragStartX: 0,
@@ -270,6 +338,8 @@ export const updateState = (event, previousState) => {
         return {
           ...inst,
           sticker: event.sticker,
+          isPaused: false,
+          pausedFrame: null,
           w: null,
           h: null,
         };
@@ -290,6 +360,8 @@ export const updateState = (event, previousState) => {
         return {
           ...inst,
           sticker: null,
+          isPaused: false,
+          pausedFrame: null,
           w: null,
           h: null,
         };
@@ -301,6 +373,84 @@ export const updateState = (event, previousState) => {
       ...previousState,
       instances: updatedInstances,
     };
+  }
+
+  if (event.type === 'TOGGLE_PAUSE') {
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+        const nextPaused = !inst.isPaused;
+        return {
+          ...inst,
+          isPaused: nextPaused,
+          pausedFrame: nextPaused ? (event.pausedFrame || inst.pausedFrame || null) : null,
+        };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'TOGGLE_AUDIO_SYNC') {
+    const nextSync = !previousState.audioSync;
+    try {
+      localStorage.setItem(STORAGE_AUDIO_SYNC_KEY, String(nextSync));
+    } catch (e) {}
+
+    let updatedInstances = previousState.instances;
+    if (!nextSync && updatedInstances) {
+      updatedInstances = updatedInstances.map((inst) => {
+        if (inst.isPaused) {
+          return { ...inst, isPaused: false, pausedFrame: null };
+        }
+        return inst;
+      });
+      saveInstances(updatedInstances);
+    }
+
+    return {
+      ...previousState,
+      audioSync: nextSync,
+      instances: updatedInstances || previousState.instances,
+    };
+  }
+
+  if (event.type === 'AUDIO_STATUS_CHANGED') {
+    const isPlaying = event.isPlaying;
+    if (isPlaying) {
+      const updatedInstances = (previousState.instances || []).map((inst) => {
+        if (inst.sticker && inst.isPaused) {
+          return { ...inst, isPaused: false, pausedFrame: null };
+        }
+        return inst;
+      });
+      saveInstances(updatedInstances);
+      return {
+        ...previousState,
+        instances: updatedInstances,
+      };
+    } else {
+      const frames = event.frames || {};
+      const updatedInstances = (previousState.instances || []).map((inst) => {
+        if (inst.sticker && !inst.isPaused) {
+          return {
+            ...inst,
+            isPaused: true,
+            pausedFrame: frames[inst.id] || inst.pausedFrame || null,
+          };
+        }
+        return inst;
+      });
+      saveInstances(updatedInstances);
+      return {
+        ...previousState,
+        instances: updatedInstances,
+      };
+    }
   }
 
   if (event.type === 'SET_NATURAL_SIZE') {
@@ -485,9 +635,20 @@ export const render = (state, dispatch) => {
     opacity = 1.0,
     shadow = true,
     enableSnapping = true,
+    audioSync = false,
   } = currentState;
 
   currentDispatch = dispatch;
+  currentWidgetState = currentState;
+
+  // Manage Audio Sync Polling (fast 200ms responsive loop)
+  if (audioSync && !audioTimer) {
+    audioTimer = setInterval(checkAudio, 200);
+    checkAudio();
+  } else if (!audioSync && audioTimer) {
+    clearInterval(audioTimer);
+    audioTimer = null;
+  }
 
   const instances = (currentState && currentState.instances && currentState.instances.length > 0)
     ? currentState.instances
@@ -498,6 +659,8 @@ export const render = (state, dispatch) => {
         y: 100,
         scale: 1.0,
         flipped: false,
+        isPaused: false,
+        pausedFrame: null,
         w: BASE_SIZE,
         h: BASE_SIZE,
       }];
@@ -540,6 +703,8 @@ export const render = (state, dispatch) => {
       currentSticker: instance.sticker || null,
       scale: instance.scale || 1.0,
       flipped: Boolean(instance.flipped),
+      isPaused: Boolean(instance.isPaused),
+      audioSync: Boolean(currentState.audioSync),
       opacity: opacity !== undefined ? opacity : 1.0,
       shadow: shadow !== false,
       enableSnapping: enableSnapping !== false,
@@ -581,6 +746,28 @@ export const render = (state, dispatch) => {
             instanceId: res.instanceId || instance.id,
             flipped: res.flipped,
           });
+        } else if (res.action === 'TOGGLE_PAUSE') {
+          const targetInstId = res.instanceId || instance.id;
+          const inst = (currentState.instances || []).find((i) => i.id === targetInstId) || instance;
+          if (!inst.isPaused) {
+            let frameData = null;
+            try {
+              const img = document.getElementById(`sticker-img-${inst.id}`);
+              if (img) {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth || img.width || BASE_SIZE;
+                canvas.height = img.naturalHeight || img.height || BASE_SIZE;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                frameData = canvas.toDataURL('image/png');
+              }
+            } catch (err) {}
+            dispatch({ type: 'TOGGLE_PAUSE', instanceId: inst.id, pausedFrame: frameData });
+          } else {
+            dispatch({ type: 'TOGGLE_PAUSE', instanceId: inst.id, pausedFrame: null });
+          }
+        } else if (res.action === 'TOGGLE_AUDIO_SYNC') {
+          dispatch({ type: 'TOGGLE_AUDIO_SYNC' });
         } else if (res.action === 'SET_OPACITY') {
           dispatch({ type: 'SET_OPACITY', opacity: res.opacity });
         } else if (res.action === 'TOGGLE_SHADOW') {
@@ -771,8 +958,10 @@ export const render = (state, dispatch) => {
                 title="Sticker (Drag to move, Double-click to flip, Right-click for options)"
               >
                 <img
-                  src={instance.sticker}
+                  id={`sticker-img-${instance.id}`}
+                  src={instance.isPaused && instance.pausedFrame ? instance.pausedFrame : instance.sticker}
                   alt="Sticker"
+                  crossOrigin="anonymous"
                   draggable={false}
                   onLoad={(e) => {
                     const nw = e.target.naturalWidth;
