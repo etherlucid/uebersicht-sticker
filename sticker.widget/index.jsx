@@ -473,49 +473,66 @@ export const render = (state, dispatch) => {
     });
   };
 
+  const SHADOW_PAD = 24;
+
   const containerStyle = {
     position: 'absolute',
-    top: `${y}px`,
-    left: `${x}px`,
-    width: `${cardWidth}px`,
-    height: `${cardHeight}px`,
+    top: `${y - SHADOW_PAD}px`,
+    left: `${x - SHADOW_PAD}px`,
+    width: `${cardWidth + SHADOW_PAD * 2}px`,
+    height: `${cardHeight + SHADOW_PAD * 2}px`,
+    padding: `${SHADOW_PAD}px`,
+    boxSizing: 'border-box',
     zIndex: 100,
-    cursor: isDragging ? 'grabbing' : 'grab',
+    pointerEvents: 'none',
     userSelect: 'none',
     WebkitUserSelect: 'none',
+  };
+
+  const stickerStyle = {
+    width: '100%',
+    height: '100%',
+    pointerEvents: 'auto',
+    cursor: isDragging ? 'grabbing' : 'grab',
     transform: flipped ? 'scaleX(-1)' : 'none',
     opacity: opacity,
-    filter: shadow ? 'drop-shadow(0 10px 22px rgba(0, 0, 0, 0.45))' : 'none',
-    transition: isDragging ? 'none' : 'opacity 0.2s ease, filter 0.2s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+    filter: (shadow && !isDragging) ? 'drop-shadow(0 4px 12px rgba(0, 0, 0, 0.35))' : 'none',
+    transition: isDragging ? 'none' : 'opacity 0.2s ease, filter 0.15s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
   };
 
   return (
     <div className="sticker-root">
-      {/* Draggable Sticker Container */}
+      {/* Padded Container to prevent shadow cutoff */}
       <div
         id="sticker-container"
         style={containerStyle}
-        onMouseDown={handleMouseDown}
-        onDoubleClick={handleDoubleClick}
-        onContextMenu={handleContextMenu}
-        title="Spider-Man Sticker (Drag to move, Double-click to flip, Right-click for options)"
       >
-        <img
-          id="sticker-spiderman-img"
-          src={isPaused && pausedFrame ? pausedFrame : 'sticker.widget/spiderman.webp'}
-          alt="Spider-Man Sticker"
-          draggable={false}
-          onDragStart={(e) => e.preventDefault()}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'contain',
-            pointerEvents: 'none',
-            userSelect: 'none',
-            WebkitUserSelect: 'none',
-            WebkitUserDrag: 'none',
-          }}
-        />
+        {/* Interactive Sticker Box */}
+        <div
+          id="sticker-interactive"
+          style={stickerStyle}
+          onMouseDown={handleMouseDown}
+          onDoubleClick={handleDoubleClick}
+          onContextMenu={handleContextMenu}
+          title="Spider-Man Sticker (Drag to move, Double-click to flip, Right-click for options)"
+        >
+          <img
+            id="sticker-spiderman-img"
+            src={isPaused && pausedFrame ? pausedFrame : 'sticker.widget/spiderman.webp'}
+            alt="Spider-Man Sticker"
+            draggable={false}
+            onDragStart={(e) => e.preventDefault()}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'contain',
+              pointerEvents: 'none',
+              userSelect: 'none',
+              WebkitUserSelect: 'none',
+              WebkitUserDrag: 'none',
+            }}
+          />
+        </div>
       </div>
     </div>
   );
