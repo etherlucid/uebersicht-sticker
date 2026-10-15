@@ -71,6 +71,26 @@ func importWebP(sourcePath: String, widgetDir: String, instanceId: String) -> St
             try? fileManager.copyItem(at: URL(fileURLWithPath: sourcePath), to: URL(fileURLWithPath: repoDestPath))
         }
 
+        // Automatically generate sprite sheet and meta JSON for instant frame-freezing
+        let scriptPath = (widgetDir as NSString).appendingPathComponent("sheet_generator.py")
+        if fileManager.fileExists(atPath: scriptPath) {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            task.arguments = [scriptPath, destPath, stickersDir]
+            try? task.run()
+            task.waitUntilExit()
+        }
+        if fileManager.fileExists(atPath: repoStickersDir) {
+            let repoScript = ((repoStickersDir as NSString).deletingLastPathComponent as NSString).appendingPathComponent("sheet_generator.py")
+            if fileManager.fileExists(atPath: repoScript) {
+                let repoTask = Process()
+                repoTask.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+                repoTask.arguments = [repoScript, repoDestPath, repoStickersDir]
+                try? repoTask.run()
+                repoTask.waitUntilExit()
+            }
+        }
+
         let relPath = "sticker.widget/stickers/\(cleanName)"
         return "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(relPath)\",\"name\":\"\(cleanName)\"}"
     } catch {
@@ -90,7 +110,7 @@ func getLocalStickers(widgetDir: String) -> [(filename: String, title: String, r
         return []
     }
     return files
-        .filter { $0.lowercased().hasSuffix(".webp") && !$0.hasPrefix(".") }
+        .filter { $0.lowercased().hasSuffix(".webp") && !$0.lowercased().hasSuffix("_sheet.webp") && !$0.hasPrefix(".") }
         .sorted()
         .map { filename in
             let rawTitle = (filename as NSString).deletingPathExtension

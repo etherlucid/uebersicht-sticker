@@ -1,0 +1,10 @@
+{
+  "isAnimated": true,
+  "width": 215,
+  "height": 146,
+  "totalFrames": 186,
+  "cols": 12,
+  "rows": 16,
+  "frameDuration": 70,
+  "sheet": "sticker.widget/stickers/spiderman_sheet.webp"
+}
