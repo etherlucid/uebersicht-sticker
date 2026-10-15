@@ -2,13 +2,14 @@ import AppKit
 import Foundation
 
 struct MenuState: Codable {
+    var mode: String?              // "PLUS_CLICK" or "CONTEXT_MENU" or "PICK_ONLY"
+    var instanceId: String?
+    var currentSticker: String?    // relative path e.g. "sticker.widget/stickers/cat.webp" or nil
     var scale: Double?
     var flipped: Bool?
-    var isPaused: Bool?
-    var audioSync: Bool?
     var opacity: Double?
     var shadow: Bool?
-    var snapping: Bool?
+    var enableSnapping: Bool?
     var x: Int?
     var y: Int?
 }
@@ -21,6 +22,92 @@ class MenuDelegate: NSObject {
     }
 }
 
+func chooseWebPFile() -> String? {
+    let script = """
+    tell application "System Events"
+        activate
+        try
+            set f to choose file of type {"org.webmproject.webp", "webp"} with prompt "Select a WebP Sticker"
+            return POSIX path of f
+        on error
+            return ""
+        end try
+    end tell
+    """
+    var error: NSDictionary?
+    if let result = NSAppleScript(source: script)?.executeAndReturnError(&error) {
+        let path = result.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !path.isEmpty && path != "CANCELED" {
+            return path
+        }
+    }
+    return nil
+}
+
+func importWebP(sourcePath: String, widgetDir: String, instanceId: String) -> String? {
+    let fileManager = FileManager.default
+    let stickersDir = (widgetDir as NSString).appendingPathComponent("stickers")
+    try? fileManager.createDirectory(atPath: stickersDir, withIntermediateDirectories: true)
+
+    let originalName = URL(fileURLWithPath: sourcePath).lastPathComponent
+    let cleanName = originalName.replacingOccurrences(of: " ", with: "_")
+    let destPath = (stickersDir as NSString).appendingPathComponent(cleanName)
+
+    let repoStickersDir = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
+    let repoDestPath = (repoStickersDir as NSString).appendingPathComponent(cleanName)
+
+    do {
+        if fileManager.fileExists(atPath: destPath) {
+            try? fileManager.removeItem(atPath: destPath)
+        }
+        try fileManager.copyItem(at: URL(fileURLWithPath: sourcePath), to: URL(fileURLWithPath: destPath))
+
+        if fileManager.fileExists(atPath: repoStickersDir) {
+            if fileManager.fileExists(atPath: repoDestPath) {
+                try? fileManager.removeItem(atPath: repoDestPath)
+            }
+            try? fileManager.copyItem(at: URL(fileURLWithPath: sourcePath), to: URL(fileURLWithPath: repoDestPath))
+        }
+
+        let relPath = "sticker.widget/stickers/\(cleanName)"
+        return "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(relPath)\",\"name\":\"\(cleanName)\"}"
+    } catch {
+        return nil
+    }
+}
+
+func pickAndImport(widgetDir: String, instanceId: String) -> String? {
+    guard let src = chooseWebPFile() else { return nil }
+    return importWebP(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId)
+}
+
+func getLocalStickers(widgetDir: String) -> [(filename: String, title: String, relPath: String)] {
+    let fileManager = FileManager.default
+    let stickersDir = (widgetDir as NSString).appendingPathComponent("stickers")
+    guard let files = try? fileManager.contentsOfDirectory(atPath: stickersDir) else {
+        return []
+    }
+    return files
+        .filter { $0.lowercased().hasSuffix(".webp") && !$0.hasPrefix(".") }
+        .sorted()
+        .map { filename in
+            let rawTitle = (filename as NSString).deletingPathExtension
+            let cleanTitle = rawTitle.replacingOccurrences(of: "_", with: " ")
+            let relPath = "sticker.widget/stickers/\(filename)"
+            return (filename: filename, title: cleanTitle, relPath: relPath)
+        }
+}
+
+func reloadWidget(widgetId: String) {
+    let script = "tell application id \"tracesOf.Uebersicht\" to reload widget id \"\(widgetId)\""
+    var err: NSDictionary?
+    NSAppleScript(source: script)?.executeAndReturnError(&err)
+    if err != nil {
+        let refreshScript = "tell application id \"tracesOf.Uebersicht\" to refresh"
+        NSAppleScript(source: refreshScript)?.executeAndReturnError(nil)
+    }
+}
+
 var state = MenuState()
 if CommandLine.arguments.count > 1 {
     let jsonStr = CommandLine.arguments[1]
@@ -29,97 +116,181 @@ if CommandLine.arguments.count > 1 {
     }
 }
 
-let currentScale = state.scale ?? 1.0
-let isFlipped = state.flipped ?? false
-let isPaused = state.isPaused ?? false
-let hasAudioSync = state.audioSync ?? false
-let currentOpacity = state.opacity ?? 1.0
-let hasShadow = state.shadow ?? true
-let hasSnapping = state.snapping ?? true
-
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
 let delegate = MenuDelegate()
-let menu = NSMenu(title: "Spider-Man Controls")
+let helperPath = CommandLine.arguments[0]
+let widgetDir = URL(fileURLWithPath: helperPath).deletingLastPathComponent().path
+let widgetFolder = URL(fileURLWithPath: helperPath).deletingLastPathComponent().lastPathComponent
+let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
+
+let mode = state.mode ?? "CONTEXT_MENU"
+let instanceId = state.instanceId ?? "default"
+let localStickers = getLocalStickers(widgetDir: widgetDir)
+
+if mode == "PICK_ONLY" {
+    if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
+        print(result)
+    }
+    exit(0)
+}
+
+if mode == "PLUS_CLICK" {
+    // If no local stickers exist yet, directly launch Finder picker!
+    if localStickers.isEmpty {
+        if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
+            print(result)
+        }
+        exit(0)
+    }
+
+    // Otherwise, show popup menu listing local stickers first, then "Choose from Finder..."
+    let menu = NSMenu(title: "Select Sticker")
+    menu.autoenablesItems = false
+
+    for sticker in localStickers {
+        let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
+        if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
+            item.state = .on
+        }
+        menu.addItem(item)
+    }
+
+    menu.addItem(NSMenuItem.separator())
+
+    let finderItem = NSMenuItem(title: "Choose from Finder…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    finderItem.target = delegate
+    finderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(finderItem)
+
+    let mouseLoc = NSEvent.mouseLocation
+    menu.popUp(positioning: nil, at: mouseLoc, in: nil)
+
+    if let action = delegate.outputAction {
+        if action.contains("TRIGGER_FINDER_PICKER") {
+            if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
+                print(result)
+            }
+        } else {
+            print(action)
+        }
+    }
+    exit(0)
+}
+
+// CONTEXT_MENU mode
+let menu = NSMenu(title: "Sticker Controls")
 menu.autoenablesItems = false
 
-// Size Submenu
-let sizeParent = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
-let sizeMenu = NSMenu(title: "Size")
-sizeMenu.autoenablesItems = false
-let sizeOptions: [(String, Double)] = [
-    ("50% (Mini)", 0.5),
-    ("75% (Compact)", 0.75),
-    ("100% (Normal)", 1.0),
-    ("125% (Large)", 1.25),
-    ("150% (Giant)", 1.5)
-]
-for (label, val) in sizeOptions {
-    let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+let hasSticker = state.currentSticker != nil && !(state.currentSticker?.isEmpty ?? true)
+
+// Change Sticker / Choose Sticker Submenu
+let stickerParentTitle = hasSticker ? "Change Sticker" : "Choose Sticker"
+let stickerParent = NSMenuItem(title: stickerParentTitle, action: nil, keyEquivalent: "")
+let stickerMenu = NSMenu(title: stickerParentTitle)
+stickerMenu.autoenablesItems = false
+
+for sticker in localStickers {
+    let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
     item.target = delegate
-    item.representedObject = "{\"action\":\"SET_SCALE\",\"scale\":\(val)}"
-    if abs(currentScale - val) < 0.01 {
+    item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
+    if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
         item.state = .on
     }
-    sizeMenu.addItem(item)
+    stickerMenu.addItem(item)
 }
-sizeParent.submenu = sizeMenu
-menu.addItem(sizeParent)
 
-// Direction Submenu
-let dirParent = NSMenuItem(title: "Facing Direction", action: nil, keyEquivalent: "")
-let dirMenu = NSMenu(title: "Facing Direction")
-dirMenu.autoenablesItems = false
-let leftItem = NSMenuItem(title: "◀ Face Left", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-leftItem.target = delegate
-leftItem.representedObject = "{\"action\":\"SET_FLIP\",\"flipped\":true}"
-if isFlipped { leftItem.state = .on }
-dirMenu.addItem(leftItem)
+if !localStickers.isEmpty {
+    stickerMenu.addItem(NSMenuItem.separator())
+}
 
-let rightItem = NSMenuItem(title: "Face Right ▶", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-rightItem.target = delegate
-rightItem.representedObject = "{\"action\":\"SET_FLIP\",\"flipped\":false}"
-if !isFlipped { rightItem.state = .on }
-dirMenu.addItem(rightItem)
-dirParent.submenu = dirMenu
-menu.addItem(dirParent)
+let chooseFinderItem = NSMenuItem(title: "Choose from Finder…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+chooseFinderItem.target = delegate
+chooseFinderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
+stickerMenu.addItem(chooseFinderItem)
 
-// Animation Toggle
-let animTitle = isPaused ? "▶ Resume Animation" : "⏸ Pause Animation"
-let animItem = NSMenuItem(title: animTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-animItem.target = delegate
-animItem.representedObject = "{\"action\":\"TOGGLE_PAUSE\"}"
-menu.addItem(animItem)
+if hasSticker {
+    stickerMenu.addItem(NSMenuItem.separator())
+    let clearItem = NSMenuItem(title: "Remove Sticker", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    clearItem.target = delegate
+    clearItem.representedObject = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\"}"
+    stickerMenu.addItem(clearItem)
+}
 
-// Audio Sync Toggle
-let syncItem = NSMenuItem(title: "🎵 Sync with System Audio", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-syncItem.target = delegate
-syncItem.representedObject = "{\"action\":\"TOGGLE_AUDIO_SYNC\"}"
-if hasAudioSync { syncItem.state = .on }
-menu.addItem(syncItem)
+stickerParent.submenu = stickerMenu
+menu.addItem(stickerParent)
 
-// Opacity Submenu
-let opParent = NSMenuItem(title: "Opacity", action: nil, keyEquivalent: "")
-let opMenu = NSMenu(title: "Opacity")
-opMenu.autoenablesItems = false
-let opacityOptions: [(String, Double)] = [
-    ("100% (Solid)", 1.0),
-    ("80%", 0.8),
-    ("60%", 0.6),
-    ("40% (Ghost)", 0.4)
-]
-for (label, val) in opacityOptions {
-    let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    item.target = delegate
-    item.representedObject = "{\"action\":\"SET_OPACITY\",\"opacity\":\(val)}"
-    if abs(currentOpacity - val) < 0.01 {
-        item.state = .on
+// If has sticker, show Size, Direction, Opacity
+if hasSticker {
+    // Size Submenu
+    let currentScale = state.scale ?? 1.0
+    let sizeParent = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
+    let sizeMenu = NSMenu(title: "Size")
+    sizeMenu.autoenablesItems = false
+    let sizeOptions: [(String, Double)] = [
+        ("50%", 0.5),
+        ("75%", 0.75),
+        ("100%", 1.0),
+        ("125%", 1.25),
+        ("150%", 1.5)
+    ]
+    for (label, val) in sizeOptions {
+        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = "{\"action\":\"SET_SCALE\",\"instanceId\":\"\(instanceId)\",\"scale\":\(val)}"
+        if abs(currentScale - val) < 0.01 {
+            item.state = .on
+        }
+        sizeMenu.addItem(item)
     }
-    opMenu.addItem(item)
+    sizeParent.submenu = sizeMenu
+    menu.addItem(sizeParent)
+
+    // Direction Submenu
+    let isFlipped = state.flipped ?? false
+    let dirParent = NSMenuItem(title: "Facing Direction", action: nil, keyEquivalent: "")
+    let dirMenu = NSMenu(title: "Facing Direction")
+    dirMenu.autoenablesItems = false
+    let leftItem = NSMenuItem(title: "◀ Face Left", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    leftItem.target = delegate
+    leftItem.representedObject = "{\"action\":\"SET_FLIP\",\"instanceId\":\"\(instanceId)\",\"flipped\":true}"
+    if isFlipped { leftItem.state = .on }
+    dirMenu.addItem(leftItem)
+
+    let rightItem = NSMenuItem(title: "Face Right ▶", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    rightItem.target = delegate
+    rightItem.representedObject = "{\"action\":\"SET_FLIP\",\"instanceId\":\"\(instanceId)\",\"flipped\":false}"
+    if !isFlipped { rightItem.state = .on }
+    dirMenu.addItem(rightItem)
+    dirParent.submenu = dirMenu
+    menu.addItem(dirParent)
+
+    // Opacity Submenu
+    let currentOpacity = state.opacity ?? 1.0
+    let opParent = NSMenuItem(title: "Opacity", action: nil, keyEquivalent: "")
+    let opMenu = NSMenu(title: "Opacity")
+    opMenu.autoenablesItems = false
+    let opacityOptions: [(String, Double)] = [
+        ("100%", 1.0),
+        ("80%", 0.8),
+        ("60%", 0.6),
+        ("40%", 0.4)
+    ]
+    for (label, val) in opacityOptions {
+        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = "{\"action\":\"SET_OPACITY\",\"opacity\":\(val)}"
+        if abs(currentOpacity - val) < 0.01 {
+            item.state = .on
+        }
+        opMenu.addItem(item)
+    }
+    opParent.submenu = opMenu
+    menu.addItem(opParent)
 }
-opParent.submenu = opMenu
-menu.addItem(opParent)
 
 menu.addItem(NSMenuItem.separator())
 
@@ -142,125 +313,46 @@ for (label, act) in orderOptions {
 orderParent.submenu = orderMenu
 menu.addItem(orderParent)
 
-// Toggles
-let shadowItem = NSMenuItem(title: "Ambient Shadow", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-shadowItem.target = delegate
-shadowItem.representedObject = "{\"action\":\"TOGGLE_SHADOW\"}"
-if hasShadow { shadowItem.state = .on }
-menu.addItem(shadowItem)
+if hasSticker {
+    let hasShadow = state.shadow ?? true
+    let shadowItem = NSMenuItem(title: "Ambient Shadow", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    shadowItem.target = delegate
+    shadowItem.representedObject = "{\"action\":\"TOGGLE_SHADOW\"}"
+    if hasShadow { shadowItem.state = .on }
+    menu.addItem(shadowItem)
+}
 
-let snapItem = NSMenuItem(title: "Edge Snapping", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+let hasSnapping = state.enableSnapping ?? true
+let snapItem = NSMenuItem(title: "Snap to Edges", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 snapItem.target = delegate
 snapItem.representedObject = "{\"action\":\"TOGGLE_SNAPPING\"}"
 if hasSnapping { snapItem.state = .on }
 menu.addItem(snapItem)
-
-let helperPath = CommandLine.arguments[0]
-let widgetDir = URL(fileURLWithPath: helperPath).deletingLastPathComponent().path
-let widgetFolder = URL(fileURLWithPath: helperPath).deletingLastPathComponent().lastPathComponent
-let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
-
-func duplicateWidget(widgetDir: String, currentX: Int, currentY: Int) -> String? {
-    let fileManager = FileManager.default
-    let parentDir = (widgetDir as NSString).deletingLastPathComponent
-    let folderName = (widgetDir as NSString).lastPathComponent
-
-    let rawName = folderName.replacingOccurrences(of: ".widget", with: "")
-    let regex = try? NSRegularExpression(pattern: "^(.*?)(?:-\\d+)?$")
-    var baseName = rawName
-    if let match = regex?.firstMatch(in: rawName, range: NSRange(rawName.startIndex..., in: rawName)),
-       let r = Range(match.range(at: 1), in: rawName) {
-        baseName = String(rawName[r])
-    }
-
-    var n = 2
-    var targetDir = ""
-    var targetName = ""
-    while true {
-        targetName = "\(baseName)-\(n).widget"
-        targetDir = (parentDir as NSString).appendingPathComponent(targetName)
-        if !fileManager.fileExists(atPath: targetDir) {
-            break
-        }
-        n += 1
-    }
-
-    do {
-        try fileManager.copyItem(atPath: widgetDir, toPath: targetDir)
-
-        let indexPath = (targetDir as NSString).appendingPathComponent("index.jsx")
-        if let data = fileManager.contents(atPath: indexPath),
-           var content = String(data: data, encoding: .utf8) {
-
-            if let keyRegex = try? NSRegularExpression(pattern: "(STORAGE_\\w+_KEY|POS_KEY|SIZE_KEY|STORAGE_KEY)(\\s*=\\s*['\"])([^'\"]+)(['\"])") {
-                content = keyRegex.stringByReplacingMatches(in: content, range: NSRange(content.startIndex..., in: content), withTemplate: "$1$2$3_\(n)$4")
-            }
-
-            if let defXRegex = try? NSRegularExpression(pattern: "(defaultX\\s*=\\s*)(\\d+)") {
-                content = defXRegex.stringByReplacingMatches(in: content, range: NSRange(content.startIndex..., in: content), withTemplate: "$1\(currentX + 30)")
-            }
-
-            if let defYRegex = try? NSRegularExpression(pattern: "(defaultY\\s*=\\s*)(\\d+)") {
-                content = defYRegex.stringByReplacingMatches(in: content, range: NSRange(content.startIndex..., in: content), withTemplate: "$1\(currentY + 30)")
-            }
-
-            try content.write(toFile: indexPath, atomically: true, encoding: .utf8)
-        }
-
-        let script = "tell application id \"tracesOf.Uebersicht\" to refresh"
-        NSAppleScript(source: script)?.executeAndReturnError(nil)
-        return targetName
-    } catch {
-        return nil
-    }
-}
-
-func removeWidget(widgetDir: String, widgetId: String, widgetFolder: String) {
-    let isDuplicate = widgetFolder.range(of: "-(\\d+)\\.widget$", options: .regularExpression) != nil ||
-                      widgetFolder.contains("copy")
-    if isDuplicate {
-        let script = "tell application \"Finder\" to delete POSIX file \"\(widgetDir)\""
-        NSAppleScript(source: script)?.executeAndReturnError(nil)
-    } else {
-        let script = "tell application id \"tracesOf.Uebersicht\" to set hidden of widget id \"\(widgetId)\" to true"
-        NSAppleScript(source: script)?.executeAndReturnError(nil)
-    }
-}
-
-func reloadWidget(widgetId: String) {
-    let script = "tell application id \"tracesOf.Uebersicht\" to reload widget id \"\(widgetId)\""
-    var err: NSDictionary?
-    NSAppleScript(source: script)?.executeAndReturnError(&err)
-    if err != nil {
-        let refreshScript = "tell application id \"tracesOf.Uebersicht\" to refresh"
-        NSAppleScript(source: refreshScript)?.executeAndReturnError(nil)
-    }
-}
 
 menu.addItem(NSMenuItem.separator())
 
 // Reset Position
 let resetItem = NSMenuItem(title: "Reset Position", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 resetItem.target = delegate
-resetItem.representedObject = "{\"action\":\"RESET_POSITION\"}"
+resetItem.representedObject = "{\"action\":\"RESET_POSITION\",\"instanceId\":\"\(instanceId)\"}"
 menu.addItem(resetItem)
 
 // Reload Widget
 let reloadItem = NSMenuItem(title: "Reload Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 reloadItem.target = delegate
-reloadItem.representedObject = "{\"action\":\"RELOAD_WIDGET\",\"widgetId\":\"\(widgetId)\",\"widgetDir\":\"\(widgetDir)\",\"widgetFolder\":\"\(widgetFolder)\"}"
+reloadItem.representedObject = "{\"action\":\"RELOAD_WIDGET\",\"widgetId\":\"\(widgetId)\"}"
 menu.addItem(reloadItem)
 
 // Duplicate Widget
 let dupItem = NSMenuItem(title: "Duplicate Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 dupItem.target = delegate
-dupItem.representedObject = "{\"action\":\"DUPLICATE_WIDGET\",\"widgetId\":\"\(widgetId)\",\"widgetDir\":\"\(widgetDir)\",\"widgetFolder\":\"\(widgetFolder)\"}"
+dupItem.representedObject = "{\"action\":\"DUPLICATE_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
 menu.addItem(dupItem)
 
 // Remove Widget
 let removeItem = NSMenuItem(title: "Remove Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 removeItem.target = delegate
-removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"widgetId\":\"\(widgetId)\",\"widgetDir\":\"\(widgetDir)\",\"widgetFolder\":\"\(widgetFolder)\"}"
+removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"instanceId\":\"\(instanceId)\",\"widgetId\":\"\(widgetId)\"}"
 menu.addItem(removeItem)
 
 // Pop up native menu above all windows at cursor location
@@ -268,16 +360,18 @@ let mouseLoc = NSEvent.mouseLocation
 menu.popUp(positioning: nil, at: mouseLoc, in: nil)
 
 if let action = delegate.outputAction {
-    print(action)
-    if let data = action.data(using: .utf8),
-       let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-       let act = json["action"] as? String {
-        if act == "RELOAD_WIDGET" {
-            reloadWidget(widgetId: widgetId)
-        } else if act == "DUPLICATE_WIDGET" {
-            _ = duplicateWidget(widgetDir: widgetDir, currentX: state.x ?? 100, currentY: state.y ?? 100)
-        } else if act == "REMOVE_WIDGET" {
-            removeWidget(widgetDir: widgetDir, widgetId: widgetId, widgetFolder: widgetFolder)
+    if action.contains("TRIGGER_FINDER_PICKER") {
+        if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
+            print(result)
+        }
+    } else {
+        print(action)
+        if let data = action.data(using: .utf8),
+           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let act = json["action"] as? String {
+            if act == "RELOAD_WIDGET" {
+                reloadWidget(widgetId: widgetId)
+            }
         }
     }
 }

@@ -3,18 +3,10 @@ import { React, run } from 'uebersicht';
 export const refreshFrequency = false;
 export const command = '';
 
-const BASE_WIDTH = 215;
-const BASE_HEIGHT = 146;
-const TOTAL_FRAMES = 186;
-const COLS = 14;
-const FRAME_DURATION = 70; // 70ms per frame (~14.3 fps)
+const BLANK_SQUARE_SIZE = 100;
+const BASE_SIZE = 180;
 
-const STORAGE_POS_KEY = 'sticker_widget_position';
-const STORAGE_SCALE_KEY = 'sticker_widget_scale';
-const STORAGE_FLIP_KEY = 'sticker_widget_flipped';
-const STORAGE_PAUSE_KEY = 'sticker_widget_paused';
-const STORAGE_FRAME_KEY = 'sticker_widget_frame_index';
-const STORAGE_AUDIO_SYNC_KEY = 'sticker_widget_audio_sync';
+const STORAGE_INSTANCES_KEY = 'sticker_widget_instances';
 const STORAGE_OPACITY_KEY = 'sticker_widget_opacity';
 const STORAGE_SHADOW_KEY = 'sticker_widget_shadow';
 const STORAGE_SNAP_KEY = 'sticker_widget_snapping';
@@ -74,7 +66,6 @@ const reorderWidget = (widgetId, action) => {
   } catch (e) {}
 };
 
-const SCREEN_MARGIN = 0;
 const SNAP_THRESHOLD = 6;
 const SNAP_EDGE_TOLERANCE = 3;
 const SNAP_MARGIN_X = 15;
@@ -82,111 +73,18 @@ const SNAP_MARGIN_TOP = 14;
 const SNAP_MARGIN_BOTTOM = 14;
 
 let lastClickTimestamp = 0;
-let audioTimer = null;
-let isCheckingAudio = false;
 let currentDispatch = null;
-let currentWidgetState = null;
 
-// Sprite Sheet Animation Engine
-let currentAnimFrame = 0;
-let sheetImage = null;
-let sheetLoaded = false;
-let animRafId = null;
-let lastFrameTimestamp = 0;
-
-const drawFrame = (frameIndex) => {
-  const canvas = document.getElementById('sticker-canvas');
-  if (!canvas || !sheetLoaded || !sheetImage) return;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-
-  const validIndex = Math.max(0, Math.min(TOTAL_FRAMES - 1, frameIndex));
-  const col = validIndex % COLS;
-  const row = Math.floor(validIndex / COLS);
-
-  ctx.clearRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
-  ctx.drawImage(
-    sheetImage,
-    col * BASE_WIDTH,
-    row * BASE_HEIGHT,
-    BASE_WIDTH,
-    BASE_HEIGHT,
-    0,
-    0,
-    BASE_WIDTH,
-    BASE_HEIGHT
-  );
-};
-
-const animLoop = (now) => {
-  if (!currentWidgetState || currentWidgetState.isPaused) {
-    animRafId = null;
-    return;
-  }
-
-  if (!lastFrameTimestamp) lastFrameTimestamp = now;
-  const delta = now - lastFrameTimestamp;
-
-  if (delta >= FRAME_DURATION) {
-    const steps = Math.floor(delta / FRAME_DURATION);
-    currentAnimFrame = (currentAnimFrame + steps) % TOTAL_FRAMES;
-    lastFrameTimestamp = now - (delta % FRAME_DURATION);
-    drawFrame(currentAnimFrame);
-  }
-
-  animRafId = requestAnimationFrame(animLoop);
-};
-
-const startAnimation = () => {
-  if (animRafId !== null) return;
-  lastFrameTimestamp = performance.now();
-  animRafId = requestAnimationFrame(animLoop);
-};
-
-const stopAnimation = () => {
-  if (animRafId !== null) {
-    cancelAnimationFrame(animRafId);
-    animRafId = null;
-  }
-};
-
-const initSheetImage = () => {
-  if (typeof Image === 'undefined' || sheetImage) return;
-  sheetImage = new Image();
-  sheetImage.src = 'sticker.widget/spiderman_sheet.webp';
-  sheetImage.onload = () => {
-    sheetLoaded = true;
-    drawFrame(currentAnimFrame);
-    if (currentWidgetState && !currentWidgetState.isPaused) {
-      startAnimation();
+const getScreenId = () => {
+  if (typeof window !== 'undefined' && window.location && window.location.pathname) {
+    const parts = window.location.pathname.split('/').filter(Boolean);
+    if (parts.length > 0 && !isNaN(Number(parts[0]))) {
+      return `screen_${parts[0]}`;
     }
-  };
-};
-
-initSheetImage();
-
-const checkAudio = () => {
-  if (isCheckingAudio) return;
-  if (!currentWidgetState || !currentWidgetState.audioSync || !currentDispatch) return;
-
-  isCheckingAudio = true;
-  const audioCheckPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/audio_check';
-  const fallbackPath = './sticker.widget/audio_check';
-  const cmd = `"${audioCheckPath}" 2>/dev/null || "${fallbackPath}" 2>/dev/null`;
-
-  run(cmd, (err, output) => {
-    isCheckingAudio = false;
-    if (err || !output) return;
-    const isPlaying = output.trim() === '1';
-    const state = currentWidgetState;
-    if (!state || !state.audioSync) return;
-
-    if (isPlaying && state.isPaused) {
-      currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: true });
-    } else if (!isPlaying && !state.isPaused) {
-      currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: false });
-    }
-  });
+  }
+  const w = typeof window !== 'undefined' ? window.screen.width : 1920;
+  const h = typeof window !== 'undefined' ? window.screen.height : 1080;
+  return `screen_${w}x${h}`;
 };
 
 const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false, enableSnapping = true) => {
@@ -205,14 +103,12 @@ const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap 
     const snapLeft = SNAP_MARGIN_X;
     const snapRight = Math.max(0, winW - cardWidth - SNAP_MARGIN_X);
 
-    // Horizontal snapping: release when moving closer to screen edge than guideline
     if (newX >= snapLeft - SNAP_EDGE_TOLERANCE && newX <= snapLeft + SNAP_THRESHOLD) {
       newX = snapLeft;
     } else if (newX >= snapRight - SNAP_THRESHOLD && newX <= snapRight + SNAP_EDGE_TOLERANCE) {
       newX = snapRight;
     }
 
-    // Vertical snapping: release when moving closer to top/bottom edge than guideline
     if (newY >= snapTop - SNAP_EDGE_TOLERANCE && newY <= snapTop + SNAP_THRESHOLD) {
       newY = snapTop;
     } else if (newY >= snapBottom - SNAP_THRESHOLD && newY <= snapBottom + SNAP_EDGE_TOLERANCE) {
@@ -227,72 +123,41 @@ const getInitialPosition = (cardW, cardH) => {
   const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
   const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
 
-  try {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_POS_KEY) : null;
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
-        const maxX = Math.max(0, winW - cardW);
-        const maxY = Math.max(0, winH - cardH);
-        return {
-          x: Math.max(0, Math.min(maxX, parsed.x)),
-          y: Math.max(0, Math.min(maxY, parsed.y)),
-        };
-      }
-    }
-  } catch (e) {}
-
-  // Default to bottom-right resting above dock
   return {
-    x: Math.max(SNAP_MARGIN_X, winW - cardW - SNAP_MARGIN_X),
-    y: Math.max(SNAP_MARGIN_TOP, winH - cardH - SNAP_MARGIN_BOTTOM),
+    x: Math.max(SNAP_MARGIN_X, winW - cardW - SNAP_MARGIN_X - 100),
+    y: Math.max(SNAP_MARGIN_TOP, winH - cardH - SNAP_MARGIN_BOTTOM - 60),
   };
 };
 
-const getInitialScale = () => {
+const getInitialInstances = () => {
+  const screenId = getScreenId();
   try {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_SCALE_KEY) : null;
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${STORAGE_INSTANCES_KEY}_${screenId}`) : null;
     if (saved) {
-      const val = parseFloat(saved);
-      if (!isNaN(val) && val >= 0.25 && val <= 3.0) return val;
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
     }
   } catch (e) {}
-  return 1.0;
+
+  const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+  return [{
+    id: 'default',
+    sticker: null,
+    x: defaultPos.x,
+    y: defaultPos.y,
+    scale: 1.0,
+    flipped: false,
+    w: BASE_SIZE,
+    h: BASE_SIZE,
+  }];
 };
 
-const getInitialFlipped = () => {
+const saveInstances = (instances) => {
+  const screenId = getScreenId();
   try {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_FLIP_KEY) : null;
-    if (saved !== null) return saved === 'true';
+    localStorage.setItem(`${STORAGE_INSTANCES_KEY}_${screenId}`, JSON.stringify(instances));
+    localStorage.setItem(STORAGE_INSTANCES_KEY, JSON.stringify(instances));
   } catch (e) {}
-  return false;
-};
-
-const getInitialPaused = () => {
-  try {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_PAUSE_KEY) : null;
-    if (saved !== null) return saved === 'true';
-  } catch (e) {}
-  return false;
-};
-
-const getInitialFrameIndex = () => {
-  try {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_FRAME_KEY) : null;
-    if (saved) {
-      const val = parseInt(saved, 10);
-      if (!isNaN(val) && val >= 0 && val < TOTAL_FRAMES) return val;
-    }
-  } catch (e) {}
-  return 0;
-};
-
-const getInitialAudioSync = () => {
-  try {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_AUDIO_SYNC_KEY) : null;
-    if (saved !== null) return saved === 'true';
-  } catch (e) {}
-  return false;
 };
 
 const getInitialOpacity = () => {
@@ -315,36 +180,31 @@ const getInitialShadow = () => {
 };
 
 const getInitialSnapping = () => {
+  const screenId = getScreenId();
   try {
+    const perScreen = typeof localStorage !== 'undefined' ? localStorage.getItem(`${STORAGE_SNAP_KEY}_${screenId}`) : null;
+    if (perScreen !== null) return perScreen === 'true';
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_SNAP_KEY) : null;
     if (saved !== null) return saved === 'true';
   } catch (e) {}
   return true;
 };
 
-const initialScale = getInitialScale();
-const initialCardW = Math.round(BASE_WIDTH * initialScale);
-const initialCardH = Math.round(BASE_HEIGHT * initialScale);
-const initialPos = getInitialPosition(initialCardW, initialCardH);
-currentAnimFrame = getInitialFrameIndex();
+const initialInstances = getInitialInstances();
 
 export const initialState = {
-  x: initialPos.x,
-  y: initialPos.y,
-  scale: initialScale,
-  cardWidth: initialCardW,
-  cardHeight: initialCardH,
-  flipped: getInitialFlipped(),
-  isPaused: getInitialPaused(),
-  audioSync: getInitialAudioSync(),
+  instances: initialInstances,
   opacity: getInitialOpacity(),
   shadow: getInitialShadow(),
   enableSnapping: getInitialSnapping(),
   isDragging: false,
+  draggingInstanceId: null,
   dragStartX: 0,
   dragStartY: 0,
   startPosX: 0,
   startPosY: 0,
+  startW: BLANK_SQUARE_SIZE,
+  startH: BLANK_SQUARE_SIZE,
 };
 
 export const updateState = (event, previousState) => {
@@ -354,35 +214,44 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isDragging: true,
+      draggingInstanceId: event.instanceId,
       dragStartX: event.clientX,
       dragStartY: event.clientY,
-      startPosX: previousState.x,
-      startPosY: previousState.y,
+      startPosX: event.startPosX !== undefined ? event.startPosX : (previousState.instances?.[0]?.x || 100),
+      startPosY: event.startPosY !== undefined ? event.startPosY : (previousState.instances?.[0]?.y || 100),
+      startW: event.w || BLANK_SQUARE_SIZE,
+      startH: event.h || BLANK_SQUARE_SIZE,
     };
   }
 
-  if (event.type === 'MOVE_DRAG' && previousState.isDragging) {
+  if (event.type === 'MOVE_DRAG' && previousState.isDragging && previousState.draggingInstanceId) {
     const deltaX = event.clientX - previousState.dragStartX;
     const deltaY = event.clientY - previousState.dragStartY;
+    const cardW = previousState.startW || BLANK_SQUARE_SIZE;
+    const cardH = previousState.startH || BLANK_SQUARE_SIZE;
     const bypassSnap = !previousState.enableSnapping || event.bypassSnap;
 
     const { x: newX, y: newY } = calculateSnappedPosition(
       previousState.startPosX + deltaX,
       previousState.startPosY + deltaY,
-      previousState.cardWidth,
-      previousState.cardHeight,
+      cardW,
+      cardH,
       bypassSnap,
       previousState.enableSnapping
     );
 
-    try {
-      localStorage.setItem(STORAGE_POS_KEY, JSON.stringify({ x: newX, y: newY }));
-    } catch (e) {}
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === previousState.draggingInstanceId) {
+        return { ...inst, x: newX, y: newY };
+      }
+      return inst;
+    });
+
+    saveInstances(updatedInstances);
 
     return {
       ...previousState,
-      x: newX,
-      y: newY,
+      instances: updatedInstances,
     };
   }
 
@@ -390,101 +259,109 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       isDragging: false,
+      draggingInstanceId: null,
+    };
+  }
+
+  if (event.type === 'SET_STICKER') {
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+        return {
+          ...inst,
+          sticker: event.sticker,
+          w: null,
+          h: null,
+        };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'CLEAR_STICKER') {
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+        return {
+          ...inst,
+          sticker: null,
+          w: null,
+          h: null,
+        };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'SET_NATURAL_SIZE') {
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === event.instanceId) {
+        return { ...inst, w: event.w, h: event.h };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
     };
   }
 
   if (event.type === 'SET_SCALE') {
     const nextScale = event.scale;
-    const newW = Math.round(BASE_WIDTH * nextScale);
-    const newH = Math.round(BASE_HEIGHT * nextScale);
-    const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
-    const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
-    const maxX = Math.max(0, winW - newW);
-    const maxY = Math.max(0, winH - newH);
-
-    const clampedX = Math.max(0, Math.min(maxX, previousState.x));
-    const clampedY = Math.max(0, Math.min(maxY, previousState.y));
-
-    try {
-      localStorage.setItem(STORAGE_SCALE_KEY, String(nextScale));
-      localStorage.setItem(STORAGE_POS_KEY, JSON.stringify({ x: clampedX, y: clampedY }));
-    } catch (e) {}
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (!targetId || inst.id === targetId) {
+        return { ...inst, scale: nextScale };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
 
     return {
       ...previousState,
-      scale: nextScale,
-      cardWidth: newW,
-      cardHeight: newH,
-      x: clampedX,
-      y: clampedY,
+      instances: updatedInstances,
     };
   }
 
   if (event.type === 'TOGGLE_FLIP') {
-    const nextFlipped = !previousState.flipped;
-    try {
-      localStorage.setItem(STORAGE_FLIP_KEY, String(nextFlipped));
-    } catch (e) {}
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (!targetId || inst.id === targetId) {
+        return { ...inst, flipped: !inst.flipped };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
     return {
       ...previousState,
-      flipped: nextFlipped,
+      instances: updatedInstances,
     };
   }
 
   if (event.type === 'SET_FLIP') {
-    try {
-      localStorage.setItem(STORAGE_FLIP_KEY, String(event.flipped));
-    } catch (e) {}
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (!targetId || inst.id === targetId) {
+        return { ...inst, flipped: event.flipped };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
     return {
       ...previousState,
-      flipped: event.flipped,
+      instances: updatedInstances,
     };
-  }
-
-  if (event.type === 'TOGGLE_PAUSE') {
-    const nextPaused = !previousState.isPaused;
-    try {
-      localStorage.setItem(STORAGE_PAUSE_KEY, String(nextPaused));
-      localStorage.setItem(STORAGE_FRAME_KEY, String(currentAnimFrame));
-    } catch (e) {}
-    return {
-      ...previousState,
-      isPaused: nextPaused,
-    };
-  }
-
-  if (event.type === 'TOGGLE_AUDIO_SYNC') {
-    const nextSync = !previousState.audioSync;
-    try {
-      localStorage.setItem(STORAGE_AUDIO_SYNC_KEY, String(nextSync));
-    } catch (e) {}
-    return {
-      ...previousState,
-      audioSync: nextSync,
-    };
-  }
-
-  if (event.type === 'AUDIO_STATUS_CHANGED') {
-    const isPlaying = event.isPlaying;
-    if (isPlaying && previousState.isPaused) {
-      try {
-        localStorage.setItem(STORAGE_PAUSE_KEY, 'false');
-      } catch (e) {}
-      return {
-        ...previousState,
-        isPaused: false,
-      };
-    } else if (!isPlaying && !previousState.isPaused) {
-      try {
-        localStorage.setItem(STORAGE_PAUSE_KEY, 'true');
-        localStorage.setItem(STORAGE_FRAME_KEY, String(currentAnimFrame));
-      } catch (e) {}
-      return {
-        ...previousState,
-        isPaused: true,
-      };
-    }
-    return previousState;
   }
 
   if (event.type === 'SET_OPACITY') {
@@ -510,7 +387,9 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'TOGGLE_SNAPPING') {
     const nextSnap = !previousState.enableSnapping;
+    const screenId = getScreenId();
     try {
+      localStorage.setItem(`${STORAGE_SNAP_KEY}_${screenId}`, String(nextSnap));
       localStorage.setItem(STORAGE_SNAP_KEY, String(nextSnap));
     } catch (e) {}
     return {
@@ -522,16 +401,63 @@ export const updateState = (event, previousState) => {
   if (event.type === 'RESET_POSITION') {
     const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
     const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
-    const defaultX = Math.max(SNAP_MARGIN_X, winW - previousState.cardWidth - SNAP_MARGIN_X);
-    const defaultY = Math.max(SNAP_MARGIN_TOP, winH - previousState.cardHeight - SNAP_MARGIN_BOTTOM);
-    try {
-      localStorage.setItem(STORAGE_POS_KEY, JSON.stringify({ x: defaultX, y: defaultY }));
-    } catch (e) {}
+    const targetId = event.instanceId;
+    const target = (previousState.instances || []).find((i) => i.id === targetId);
+    const cardW = target?.sticker ? Math.round((target.w || BASE_SIZE) * (target.scale || 1.0)) : BLANK_SQUARE_SIZE;
+    const cardH = target?.sticker ? Math.round((target.h || BASE_SIZE) * (target.scale || 1.0)) : BLANK_SQUARE_SIZE;
+
+    const defaultX = Math.max(SNAP_MARGIN_X, winW - cardW - SNAP_MARGIN_X - 100);
+    const defaultY = Math.max(SNAP_MARGIN_TOP, winH - cardH - SNAP_MARGIN_BOTTOM - 60);
+
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+        return { ...inst, x: defaultX, y: defaultY };
+      }
+      return inst;
+    });
+
+    saveInstances(updatedInstances);
+
     return {
       ...previousState,
-      x: defaultX,
-      y: defaultY,
+      instances: updatedInstances,
     };
+  }
+
+  if (event.type === 'DUPLICATE_WIDGET') {
+    const current = previousState.instances && previousState.instances.length > 0
+      ? previousState.instances
+      : [{ id: 'default', x: 100, y: 100, scale: 1.0, flipped: false, sticker: null }];
+    const target = current.find((i) => i.id === event.instanceId) || current[current.length - 1];
+    const newInst = {
+      ...target,
+      id: `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      x: (target.x ?? 100) + 30,
+      y: (target.y ?? 100) + 30,
+      sticker: target.sticker || null,
+    };
+    const updatedInstances = [...current, newInst];
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'REMOVE_WIDGET') {
+    const current = previousState.instances || [];
+    if (current.length > 1) {
+      const updatedInstances = current.filter((i) => i.id !== event.instanceId);
+      saveInstances(updatedInstances);
+      return {
+        ...previousState,
+        instances: updatedInstances,
+      };
+    } else {
+      const wid = event.widgetId || 'sticker-widget-index-jsx';
+      run(`osascript -e 'tell application id "tracesOf.Uebersicht" to set hidden of widget id "${wid}" to true'`);
+      return previousState;
+    }
   }
 
   if (event.type === 'ORDER_CHANGED') {
@@ -554,117 +480,71 @@ if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_sticker
 }
 
 export const render = (state, dispatch) => {
-  const currentState = state && typeof state.x === 'number' ? state : initialState;
+  const currentState = state || initialState;
   const {
-    x,
-    y,
-    scale,
-    cardWidth,
-    cardHeight,
-    flipped,
-    isPaused,
-    audioSync,
-    opacity,
-    shadow,
-    enableSnapping,
-    isDragging,
+    opacity = 1.0,
+    shadow = true,
+    enableSnapping = true,
   } = currentState;
 
   currentDispatch = dispatch;
-  currentWidgetState = currentState;
 
-  // Manage Animation Playback State
-  if (!isPaused) {
-    startAnimation();
-  } else {
-    stopAnimation();
-    drawFrame(currentAnimFrame);
-  }
+  const instances = (currentState && currentState.instances && currentState.instances.length > 0)
+    ? currentState.instances
+    : [{
+        id: 'default',
+        sticker: null,
+        x: 100,
+        y: 100,
+        scale: 1.0,
+        flipped: false,
+        w: BASE_SIZE,
+        h: BASE_SIZE,
+      }];
 
-  // Manage Audio Sync Polling (fast 200ms responsive loop)
-  if (audioSync && !audioTimer) {
-    audioTimer = setInterval(checkAudio, 200);
-    checkAudio();
-  } else if (!audioSync && audioTimer) {
-    clearInterval(audioTimer);
-    audioTimer = null;
-  }
+  const SHADOW_PAD = 24;
 
-  const handleMouseDown = (e) => {
-    if (e.button !== 0) return; // Only primary button
+  const handlePlusClick = (instanceId, e) => {
+    if (e && e.stopPropagation) e.stopPropagation();
+    const payload = JSON.stringify({
+      mode: 'PLUS_CLICK',
+      instanceId,
+    });
+    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
+    const fallbackPath = './sticker.widget/menu_helper';
+    const escapedPayload = payload.replace(/'/g, "'\\''");
+    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
 
-    const now = Date.now();
-    const isDoubleClick = now - lastClickTimestamp < 320;
-    lastClickTimestamp = now;
-
-    if (isDoubleClick) {
-      e.preventDefault();
-      dispatch({ type: 'TOGGLE_FLIP' });
-      return;
-    }
-
-    const startX = e.clientX;
-    const startY = e.clientY;
-    let hasMoved = false;
-
-    const handleMouseMove = (moveEvent) => {
-      const dx = moveEvent.clientX - startX;
-      const dy = moveEvent.clientY - startY;
-
-      if (!hasMoved) {
-        if (Math.hypot(dx, dy) > 3) {
-          hasMoved = true;
+    run(cmd, (err, output) => {
+      if (err || !output) return;
+      try {
+        const res = JSON.parse(output.trim());
+        if (res && res.action === 'SET_STICKER' && res.sticker) {
           dispatch({
-            type: 'START_DRAG',
-            clientX: startX,
-            clientY: startY,
+            type: 'SET_STICKER',
+            instanceId: res.instanceId || instanceId,
+            sticker: res.sticker,
           });
         }
-      }
-
-      if (hasMoved) {
-        moveEvent.preventDefault();
-        dispatch({
-          type: 'MOVE_DRAG',
-          clientX: moveEvent.clientX,
-          clientY: moveEvent.clientY,
-          bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-        });
-      }
-    };
-
-    const handleMouseUp = () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-      if (hasMoved) {
-        dispatch({ type: 'END_DRAG' });
-      }
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+      } catch (parseErr) {}
+    });
   };
 
-  const handleDoubleClick = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dispatch({ type: 'TOGGLE_FLIP' });
-  };
-
-  const handleContextMenu = (e) => {
+  const handleContextMenu = (instance, e) => {
     e.preventDefault();
     e.stopPropagation();
 
     const payload = JSON.stringify({
-      scale: scale || 1.0,
-      flipped: Boolean(flipped),
-      isPaused: Boolean(isPaused),
-      audioSync: Boolean(audioSync),
+      mode: 'CONTEXT_MENU',
+      instanceId: instance.id,
+      currentSticker: instance.sticker || null,
+      scale: instance.scale || 1.0,
+      flipped: Boolean(instance.flipped),
       opacity: opacity !== undefined ? opacity : 1.0,
       shadow: shadow !== false,
-      snapping: enableSnapping !== false,
-      x: Math.round(x),
-      y: Math.round(y),
+      enableSnapping: enableSnapping !== false,
+      x: Math.round(instance.x),
+      y: Math.round(instance.y),
     });
 
     const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
@@ -678,14 +558,29 @@ export const render = (state, dispatch) => {
         const res = JSON.parse(output.trim());
         if (!res || !res.action) return;
 
-        if (res.action === 'SET_SCALE') {
-          dispatch({ type: 'SET_SCALE', scale: res.scale });
+        if (res.action === 'SET_STICKER') {
+          dispatch({
+            type: 'SET_STICKER',
+            instanceId: res.instanceId || instance.id,
+            sticker: res.sticker,
+          });
+        } else if (res.action === 'CLEAR_STICKER') {
+          dispatch({
+            type: 'CLEAR_STICKER',
+            instanceId: res.instanceId || instance.id,
+          });
+        } else if (res.action === 'SET_SCALE') {
+          dispatch({
+            type: 'SET_SCALE',
+            instanceId: res.instanceId || instance.id,
+            scale: res.scale,
+          });
         } else if (res.action === 'SET_FLIP') {
-          dispatch({ type: 'SET_FLIP', flipped: res.flipped });
-        } else if (res.action === 'TOGGLE_PAUSE') {
-          dispatch({ type: 'TOGGLE_PAUSE' });
-        } else if (res.action === 'TOGGLE_AUDIO_SYNC') {
-          dispatch({ type: 'TOGGLE_AUDIO_SYNC' });
+          dispatch({
+            type: 'SET_FLIP',
+            instanceId: res.instanceId || instance.id,
+            flipped: res.flipped,
+          });
         } else if (res.action === 'SET_OPACITY') {
           dispatch({ type: 'SET_OPACITY', opacity: res.opacity });
         } else if (res.action === 'TOGGLE_SHADOW') {
@@ -693,22 +588,14 @@ export const render = (state, dispatch) => {
         } else if (res.action === 'TOGGLE_SNAPPING') {
           dispatch({ type: 'TOGGLE_SNAPPING' });
         } else if (res.action === 'RESET_POSITION') {
-          dispatch({ type: 'RESET_POSITION' });
+          dispatch({ type: 'RESET_POSITION', instanceId: res.instanceId || instance.id });
         } else if (res.action === 'RELOAD_WIDGET') {
           const wid = res.widgetId || 'sticker-widget-index-jsx';
           run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
         } else if (res.action === 'REMOVE_WIDGET') {
-          const wid = res.widgetId || 'sticker-widget-index-jsx';
-          const dir = res.widgetDir || '';
-          const folder = res.widgetFolder || '';
-          const isDuplicate = /(-copy|\bcopy\b|-\d+)\.widget$/i.test(folder);
-          if (isDuplicate && dir) {
-            run(`osascript -e 'tell application "Finder" to delete POSIX file "${dir}"'`);
-          } else {
-            run(`osascript -e 'tell application id "tracesOf.Uebersicht" to set hidden of widget id "${wid}" to true'`);
-          }
+          dispatch({ type: 'REMOVE_WIDGET', instanceId: res.instanceId || instance.id, widgetId: res.widgetId || 'sticker-widget-index-jsx' });
         } else if (res.action === 'DUPLICATE_WIDGET') {
-          run(`osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
+          dispatch({ type: 'DUPLICATE_WIDGET', instanceId: res.instanceId || instance.id });
         } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
           reorderWidget('sticker', res.action);
           dispatch({ type: 'ORDER_CHANGED' });
@@ -717,65 +604,211 @@ export const render = (state, dispatch) => {
     });
   };
 
-  const SHADOW_PAD = 24;
-
-  const containerStyle = {
-    position: 'absolute',
-    top: `${y - SHADOW_PAD}px`,
-    left: `${x - SHADOW_PAD}px`,
-    width: `${cardWidth + SHADOW_PAD * 2}px`,
-    height: `${cardHeight + SHADOW_PAD * 2}px`,
-    padding: `${SHADOW_PAD}px`,
-    boxSizing: 'border-box',
-    zIndex: isDragging ? 9999 : getWidgetZIndex('sticker'),
-    pointerEvents: 'none',
-    userSelect: 'none',
-    WebkitUserSelect: 'none',
-  };
-
-  const stickerStyle = {
-    width: '100%',
-    height: '100%',
-    pointerEvents: 'auto',
-    cursor: isDragging ? 'grabbing' : 'grab',
-    transform: flipped ? 'scaleX(-1)' : 'none',
-    opacity: opacity,
-    filter: (shadow && !isDragging) ? 'drop-shadow(0 4px 12px rgba(0, 0, 0, 0.35))' : 'none',
-    transition: isDragging ? 'none' : 'opacity 0.2s ease, filter 0.15s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
-  };
-
   return (
     <div className="sticker-root">
-      {/* Padded Container to prevent shadow cutoff */}
-      <div
-        id="sticker-container"
-        style={containerStyle}
-      >
-        {/* Interactive Sticker Box */}
-        <div
-          id="sticker-interactive"
-          style={stickerStyle}
-          onMouseDown={handleMouseDown}
-          onDoubleClick={handleDoubleClick}
-          onContextMenu={handleContextMenu}
-          title="Spider-Man Sticker (Drag to move, Double-click to flip, Right-click for options)"
-        >
-          <canvas
-            id="sticker-canvas"
-            width={BASE_WIDTH}
-            height={BASE_HEIGHT}
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'contain',
-              pointerEvents: 'none',
-              userSelect: 'none',
-              WebkitUserSelect: 'none',
-              imageRendering: '-webkit-optimize-contrast',
-            }}
-          />
-        </div>
-      </div>
+      {instances.map((instance) => {
+        const hasSticker = Boolean(instance.sticker);
+        const instScale = instance.scale ?? 1.0;
+        const instCardW = hasSticker
+          ? Math.round((instance.w || BASE_SIZE) * instScale)
+          : BLANK_SQUARE_SIZE;
+        const instCardH = hasSticker
+          ? Math.round((instance.h || BASE_SIZE) * instScale)
+          : BLANK_SQUARE_SIZE;
+        const instFlipped = Boolean(instance.flipped);
+        const x = instance.x ?? 100;
+        const y = instance.y ?? 100;
+        const isDragging = currentState.isDragging && currentState.draggingInstanceId === instance.id;
+
+        const handleMouseDown = (e) => {
+          if (e.button !== 0) return; // Only primary mouse button
+
+          const now = Date.now();
+          if (hasSticker) {
+            const isDoubleClick = now - lastClickTimestamp < 320;
+            lastClickTimestamp = now;
+
+            if (isDoubleClick) {
+              e.preventDefault();
+              dispatch({ type: 'TOGGLE_FLIP', instanceId: instance.id });
+              return;
+            }
+          }
+
+          const startX = e.clientX;
+          const startY = e.clientY;
+          let hasMoved = false;
+
+          const handleMouseMove = (moveEvent) => {
+            const dx = moveEvent.clientX - startX;
+            const dy = moveEvent.clientY - startY;
+
+            if (!hasMoved) {
+              if (Math.hypot(dx, dy) > 4) {
+                hasMoved = true;
+                dispatch({
+                  type: 'START_DRAG',
+                  instanceId: instance.id,
+                  clientX: startX,
+                  clientY: startY,
+                  startPosX: x,
+                  startPosY: y,
+                  w: instCardW,
+                  h: instCardH,
+                });
+              }
+            }
+
+            if (hasMoved) {
+              moveEvent.preventDefault();
+              dispatch({
+                type: 'MOVE_DRAG',
+                clientX: moveEvent.clientX,
+                clientY: moveEvent.clientY,
+                bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
+              });
+            }
+          };
+
+          const handleMouseUp = () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+            if (hasMoved) {
+              dispatch({ type: 'END_DRAG' });
+            } else if (!hasSticker) {
+              // Clicked without dragging on blank square: open picker / menu!
+              handlePlusClick(instance.id, e);
+            }
+          };
+
+          window.addEventListener('mousemove', handleMouseMove);
+          window.addEventListener('mouseup', handleMouseUp);
+        };
+
+        const containerStyle = {
+          position: 'absolute',
+          top: `${y - (hasSticker ? SHADOW_PAD : 0)}px`,
+          left: `${x - (hasSticker ? SHADOW_PAD : 0)}px`,
+          width: `${instCardW + (hasSticker ? SHADOW_PAD * 2 : 0)}px`,
+          height: `${instCardH + (hasSticker ? SHADOW_PAD * 2 : 0)}px`,
+          padding: hasSticker ? `${SHADOW_PAD}px` : 0,
+          boxSizing: 'border-box',
+          zIndex: isDragging ? 9999 : getWidgetZIndex('sticker'),
+          pointerEvents: hasSticker ? 'none' : 'auto',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
+        };
+
+        const blankSquareStyle = {
+          width: `${BLANK_SQUARE_SIZE}px`,
+          height: `${BLANK_SQUARE_SIZE}px`,
+          background: 'rgba(28, 27, 25, 0.75)',
+          backdropFilter: 'blur(25px)',
+          WebkitBackdropFilter: 'blur(25px)',
+          borderRadius: '16px',
+          border: '1px solid rgba(255, 255, 255, 0.12)',
+          boxShadow: '0 8px 32px rgba(0, 0, 0, 0.35)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: isDragging ? 'grabbing' : 'pointer',
+          boxSizing: 'border-box',
+          pointerEvents: 'auto',
+        };
+
+        const stickerStyle = {
+          width: '100%',
+          height: '100%',
+          pointerEvents: 'auto',
+          cursor: isDragging ? 'grabbing' : 'grab',
+          transform: instFlipped ? 'scaleX(-1)' : 'none',
+          opacity: opacity,
+          filter: (shadow && !isDragging) ? 'drop-shadow(0 4px 12px rgba(0, 0, 0, 0.35))' : 'none',
+          transition: isDragging ? 'none' : 'opacity 0.2s ease, filter 0.15s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+        };
+
+        return (
+          <div
+            key={instance.id}
+            id={`sticker-container-${instance.id}`}
+            style={containerStyle}
+            onContextMenu={(e) => handleContextMenu(instance, e)}
+          >
+            {!hasSticker ? (
+              /* Blank Square Placeholder with Large Off-White Plus Sign */
+              <div
+                className="sticker-blank-square"
+                style={blankSquareStyle}
+                onMouseDown={handleMouseDown}
+                title="Click to select WebP Sticker (or drag to position)"
+              >
+                <svg
+                  className="sticker-plus-icon"
+                  width="42"
+                  height="42"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="rgba(242, 242, 247, 0.82)"
+                  strokeWidth="2.3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  style={{
+                    pointerEvents: 'none',
+                    filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.3))',
+                    transition: 'stroke 0.15s ease, transform 0.15s ease',
+                  }}
+                >
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </div>
+            ) : (
+              /* Active WebP Sticker Box */
+              <div
+                id={`sticker-interactive-${instance.id}`}
+                style={stickerStyle}
+                onMouseDown={handleMouseDown}
+                title="Sticker (Drag to move, Double-click to flip, Right-click for options)"
+              >
+                <img
+                  src={instance.sticker}
+                  alt="Sticker"
+                  draggable={false}
+                  onLoad={(e) => {
+                    const nw = e.target.naturalWidth;
+                    const nh = e.target.naturalHeight;
+                    if (nw && nh && (!instance.w || !instance.h)) {
+                      const aspect = nw / nh;
+                      let fitW = BASE_SIZE;
+                      let fitH = BASE_SIZE;
+                      if (aspect >= 1) {
+                        fitH = Math.round(BASE_SIZE / aspect);
+                      } else {
+                        fitW = Math.round(BASE_SIZE * aspect);
+                      }
+                      dispatch({
+                        type: 'SET_NATURAL_SIZE',
+                        instanceId: instance.id,
+                        w: fitW,
+                        h: fitH,
+                      });
+                    }
+                  }}
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'contain',
+                    pointerEvents: 'none',
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none',
+                    imageRendering: '-webkit-optimize-contrast',
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 };
@@ -783,4 +816,20 @@ export const render = (state, dispatch) => {
 export const className = `
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color: #ffffff;
+
+  .sticker-blank-square {
+    transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+  }
+  .sticker-blank-square:hover {
+    border-color: rgba(255, 255, 255, 0.28) !important;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.1) inset !important;
+    transform: scale(1.03);
+  }
+  .sticker-blank-square:hover .sticker-plus-icon {
+    stroke: rgba(255, 255, 255, 1) !important;
+    transform: scale(1.08);
+  }
+  .sticker-blank-square:active {
+    transform: scale(0.97);
+  }
 `;
