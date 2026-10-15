@@ -11,6 +11,7 @@ const STORAGE_SCALE_KEY = 'sticker_widget_scale';
 const STORAGE_FLIP_KEY = 'sticker_widget_flipped';
 const STORAGE_PAUSE_KEY = 'sticker_widget_paused';
 const STORAGE_PAUSE_FRAME_KEY = 'sticker_widget_paused_frame';
+const STORAGE_AUDIO_SYNC_KEY = 'sticker_widget_audio_sync';
 const STORAGE_OPACITY_KEY = 'sticker_widget_opacity';
 const STORAGE_SHADOW_KEY = 'sticker_widget_shadow';
 const STORAGE_SNAP_KEY = 'sticker_widget_snapping';
@@ -23,6 +24,46 @@ const SNAP_MARGIN_TOP = 14;
 const SNAP_MARGIN_BOTTOM = 14;
 
 let lastClickTimestamp = 0;
+let audioTimer = null;
+let isCheckingAudio = false;
+let currentDispatch = null;
+let currentWidgetState = null;
+
+const checkAudio = () => {
+  if (isCheckingAudio) return;
+  if (!currentWidgetState || !currentWidgetState.audioSync || !currentDispatch) return;
+
+  isCheckingAudio = true;
+  const audioCheckPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/audio_check';
+  const fallbackPath = './sticker.widget/audio_check';
+  const cmd = `"${audioCheckPath}" 2>/dev/null || "${fallbackPath}" 2>/dev/null`;
+
+  run(cmd, (err, output) => {
+    isCheckingAudio = false;
+    if (err || !output) return;
+    const isPlaying = output.trim() === '1';
+    const state = currentWidgetState;
+    if (!state || !state.audioSync) return;
+
+    if (isPlaying && state.isPaused) {
+      currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: true });
+    } else if (!isPlaying && !state.isPaused) {
+      let frameData = null;
+      try {
+        const img = document.getElementById('sticker-spiderman-img');
+        if (img) {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || BASE_WIDTH;
+          canvas.height = img.naturalHeight || BASE_HEIGHT;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          frameData = canvas.toDataURL('image/png');
+        }
+      } catch (e) {}
+      currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: false, pausedFrame: frameData });
+    }
+  });
+};
 
 const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false, enableSnapping = true) => {
   const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
@@ -118,6 +159,14 @@ const getInitialPausedFrame = () => {
   return null;
 };
 
+const getInitialAudioSync = () => {
+  try {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_AUDIO_SYNC_KEY) : null;
+    if (saved !== null) return saved === 'true';
+  } catch (e) {}
+  return false;
+};
+
 const getInitialOpacity = () => {
   try {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_OPACITY_KEY) : null;
@@ -159,6 +208,7 @@ export const initialState = {
   flipped: getInitialFlipped(),
   isPaused: getInitialPaused(),
   pausedFrame: getInitialPausedFrame(),
+  audioSync: getInitialAudioSync(),
   opacity: getInitialOpacity(),
   shadow: getInitialShadow(),
   enableSnapping: getInitialSnapping(),
@@ -280,6 +330,35 @@ export const updateState = (event, previousState) => {
     };
   }
 
+  if (event.type === 'TOGGLE_AUDIO_SYNC') {
+    const nextSync = !previousState.audioSync;
+    try {
+      localStorage.setItem(STORAGE_AUDIO_SYNC_KEY, String(nextSync));
+    } catch (e) {}
+    return {
+      ...previousState,
+      audioSync: nextSync,
+    };
+  }
+
+  if (event.type === 'AUDIO_STATUS_CHANGED') {
+    const isPlaying = event.isPlaying;
+    if (isPlaying && previousState.isPaused) {
+      return {
+        ...previousState,
+        isPaused: false,
+        pausedFrame: null,
+      };
+    } else if (!isPlaying && !previousState.isPaused) {
+      return {
+        ...previousState,
+        isPaused: true,
+        pausedFrame: event.pausedFrame || previousState.pausedFrame,
+      };
+    }
+    return previousState;
+  }
+
   if (event.type === 'SET_OPACITY') {
     try {
       localStorage.setItem(STORAGE_OPACITY_KEY, String(event.opacity));
@@ -341,11 +420,24 @@ export const render = (state, dispatch) => {
     flipped,
     isPaused,
     pausedFrame,
+    audioSync,
     opacity,
     shadow,
     enableSnapping,
     isDragging,
   } = currentState;
+
+  currentDispatch = dispatch;
+  currentWidgetState = currentState;
+
+  // Manage Audio Sync Polling
+  if (audioSync && !audioTimer) {
+    audioTimer = setInterval(checkAudio, 800);
+    checkAudio();
+  } else if (!audioSync && audioTimer) {
+    clearInterval(audioTimer);
+    audioTimer = null;
+  }
 
   const handleMouseDown = (e) => {
     if (e.button !== 0) return; // Only primary button
@@ -438,6 +530,7 @@ export const render = (state, dispatch) => {
       scale: scale || 1.0,
       flipped: Boolean(flipped),
       isPaused: Boolean(isPaused),
+      audioSync: Boolean(audioSync),
       opacity: opacity !== undefined ? opacity : 1.0,
       shadow: shadow !== false,
       snapping: enableSnapping !== false,
@@ -460,6 +553,8 @@ export const render = (state, dispatch) => {
           dispatch({ type: 'SET_FLIP', flipped: res.flipped });
         } else if (res.action === 'TOGGLE_PAUSE') {
           handleTogglePause();
+        } else if (res.action === 'TOGGLE_AUDIO_SYNC') {
+          dispatch({ type: 'TOGGLE_AUDIO_SYNC' });
         } else if (res.action === 'SET_OPACITY') {
           dispatch({ type: 'SET_OPACITY', opacity: res.opacity });
         } else if (res.action === 'TOGGLE_SHADOW') {

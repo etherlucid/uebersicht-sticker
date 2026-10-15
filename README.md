@@ -21,6 +21,7 @@ Defaults to an iconic Spider-Man pixel-art walk cycle with ground shadow blendin
   - **Size**: Submenu with 50% (Mini), 75% (Compact), 100% (Normal), 125% (Large), 150% (Giant).
   - **Facing Direction**: ◀ Face Left / Face Right ▶.
   - **Play / Pause**: Freeze the animation on the current frame or resume playback.
+  - **🎵 Sync with System Audio**: Automatically plays the animation whenever any audio is playing on the system (Spotify, Apple Music, YouTube, videos, games, podcasts) and freezes him in mid-stride when audio stops.
   - **Opacity**: 100%, 80%, 60%, 40% (Ghost mode).
   - **Ambient Shadow**: Toggle soft drop shadow on/off.
   - **Edge Snapping**: Toggle edge guidelines on or off.

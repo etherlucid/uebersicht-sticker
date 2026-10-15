@@ -5,6 +5,7 @@ struct MenuState: Codable {
     var scale: Double?
     var flipped: Bool?
     var isPaused: Bool?
+    var audioSync: Bool?
     var opacity: Double?
     var shadow: Bool?
     var snapping: Bool?
@@ -29,6 +30,7 @@ if CommandLine.arguments.count > 1 {
 let currentScale = state.scale ?? 1.0
 let isFlipped = state.flipped ?? false
 let isPaused = state.isPaused ?? false
+let hasAudioSync = state.audioSync ?? false
 let currentOpacity = state.opacity ?? 1.0
 let hasShadow = state.shadow ?? true
 let hasSnapping = state.snapping ?? true
@@ -93,6 +95,13 @@ let animItem = NSMenuItem(title: animTitle, action: #selector(MenuDelegate.handl
 animItem.target = delegate
 animItem.representedObject = "{\"action\":\"TOGGLE_PAUSE\"}"
 menu.addItem(animItem)
+
+// Audio Sync Toggle
+let syncItem = NSMenuItem(title: "🎵 Sync with System Audio", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+syncItem.target = delegate
+syncItem.representedObject = "{\"action\":\"TOGGLE_AUDIO_SYNC\"}"
+if hasAudioSync { syncItem.state = .on }
+menu.addItem(syncItem)
 
 // Opacity Submenu
 let opParent = NSMenuItem(title: "Opacity", action: nil, keyEquivalent: "")
