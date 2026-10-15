@@ -430,9 +430,9 @@ export const render = (state, dispatch) => {
   currentDispatch = dispatch;
   currentWidgetState = currentState;
 
-  // Manage Audio Sync Polling
+  // Manage Audio Sync Polling (fast 200ms responsive loop)
   if (audioSync && !audioTimer) {
-    audioTimer = setInterval(checkAudio, 800);
+    audioTimer = setInterval(checkAudio, 200);
     checkAudio();
   } else if (!audioSync && audioTimer) {
     clearInterval(audioTimer);
