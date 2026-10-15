@@ -5,12 +5,15 @@ export const command = '';
 
 const BASE_WIDTH = 215;
 const BASE_HEIGHT = 146;
+const TOTAL_FRAMES = 186;
+const COLS = 14;
+const FRAME_DURATION = 70; // 70ms per frame (~14.3 fps)
 
 const STORAGE_POS_KEY = 'sticker_widget_position';
 const STORAGE_SCALE_KEY = 'sticker_widget_scale';
 const STORAGE_FLIP_KEY = 'sticker_widget_flipped';
 const STORAGE_PAUSE_KEY = 'sticker_widget_paused';
-const STORAGE_PAUSE_FRAME_KEY = 'sticker_widget_paused_frame';
+const STORAGE_FRAME_KEY = 'sticker_widget_frame_index';
 const STORAGE_AUDIO_SYNC_KEY = 'sticker_widget_audio_sync';
 const STORAGE_OPACITY_KEY = 'sticker_widget_opacity';
 const STORAGE_SHADOW_KEY = 'sticker_widget_shadow';
@@ -28,6 +31,84 @@ let audioTimer = null;
 let isCheckingAudio = false;
 let currentDispatch = null;
 let currentWidgetState = null;
+
+// Sprite Sheet Animation Engine
+let currentAnimFrame = 0;
+let sheetImage = null;
+let sheetLoaded = false;
+let animRafId = null;
+let lastFrameTimestamp = 0;
+
+const drawFrame = (frameIndex) => {
+  const canvas = document.getElementById('sticker-canvas');
+  if (!canvas || !sheetLoaded || !sheetImage) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const validIndex = Math.max(0, Math.min(TOTAL_FRAMES - 1, frameIndex));
+  const col = validIndex % COLS;
+  const row = Math.floor(validIndex / COLS);
+
+  ctx.clearRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
+  ctx.drawImage(
+    sheetImage,
+    col * BASE_WIDTH,
+    row * BASE_HEIGHT,
+    BASE_WIDTH,
+    BASE_HEIGHT,
+    0,
+    0,
+    BASE_WIDTH,
+    BASE_HEIGHT
+  );
+};
+
+const animLoop = (now) => {
+  if (!currentWidgetState || currentWidgetState.isPaused) {
+    animRafId = null;
+    return;
+  }
+
+  if (!lastFrameTimestamp) lastFrameTimestamp = now;
+  const delta = now - lastFrameTimestamp;
+
+  if (delta >= FRAME_DURATION) {
+    const steps = Math.floor(delta / FRAME_DURATION);
+    currentAnimFrame = (currentAnimFrame + steps) % TOTAL_FRAMES;
+    lastFrameTimestamp = now - (delta % FRAME_DURATION);
+    drawFrame(currentAnimFrame);
+  }
+
+  animRafId = requestAnimationFrame(animLoop);
+};
+
+const startAnimation = () => {
+  if (animRafId !== null) return;
+  lastFrameTimestamp = performance.now();
+  animRafId = requestAnimationFrame(animLoop);
+};
+
+const stopAnimation = () => {
+  if (animRafId !== null) {
+    cancelAnimationFrame(animRafId);
+    animRafId = null;
+  }
+};
+
+const initSheetImage = () => {
+  if (typeof Image === 'undefined' || sheetImage) return;
+  sheetImage = new Image();
+  sheetImage.src = 'sticker.widget/spiderman_sheet.webp';
+  sheetImage.onload = () => {
+    sheetLoaded = true;
+    drawFrame(currentAnimFrame);
+    if (currentWidgetState && !currentWidgetState.isPaused) {
+      startAnimation();
+    }
+  };
+};
+
+initSheetImage();
 
 const checkAudio = () => {
   if (isCheckingAudio) return;
@@ -48,19 +129,7 @@ const checkAudio = () => {
     if (isPlaying && state.isPaused) {
       currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: true });
     } else if (!isPlaying && !state.isPaused) {
-      let frameData = null;
-      try {
-        const img = document.getElementById('sticker-spiderman-img');
-        if (img) {
-          const canvas = document.createElement('canvas');
-          canvas.width = img.naturalWidth || BASE_WIDTH;
-          canvas.height = img.naturalHeight || BASE_HEIGHT;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0);
-          frameData = canvas.toDataURL('image/png');
-        }
-      } catch (e) {}
-      currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: false, pausedFrame: frameData });
+      currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: false });
     }
   });
 };
@@ -152,11 +221,15 @@ const getInitialPaused = () => {
   return false;
 };
 
-const getInitialPausedFrame = () => {
+const getInitialFrameIndex = () => {
   try {
-    return typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_PAUSE_FRAME_KEY) : null;
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_FRAME_KEY) : null;
+    if (saved) {
+      const val = parseInt(saved, 10);
+      if (!isNaN(val) && val >= 0 && val < TOTAL_FRAMES) return val;
+    }
   } catch (e) {}
-  return null;
+  return 0;
 };
 
 const getInitialAudioSync = () => {
@@ -198,6 +271,7 @@ const initialScale = getInitialScale();
 const initialCardW = Math.round(BASE_WIDTH * initialScale);
 const initialCardH = Math.round(BASE_HEIGHT * initialScale);
 const initialPos = getInitialPosition(initialCardW, initialCardH);
+currentAnimFrame = getInitialFrameIndex();
 
 export const initialState = {
   x: initialPos.x,
@@ -207,7 +281,6 @@ export const initialState = {
   cardHeight: initialCardH,
   flipped: getInitialFlipped(),
   isPaused: getInitialPaused(),
-  pausedFrame: getInitialPausedFrame(),
   audioSync: getInitialAudioSync(),
   opacity: getInitialOpacity(),
   shadow: getInitialShadow(),
@@ -317,16 +390,11 @@ export const updateState = (event, previousState) => {
     const nextPaused = !previousState.isPaused;
     try {
       localStorage.setItem(STORAGE_PAUSE_KEY, String(nextPaused));
-      if (nextPaused && event.pausedFrame) {
-        localStorage.setItem(STORAGE_PAUSE_FRAME_KEY, event.pausedFrame);
-      } else {
-        localStorage.removeItem(STORAGE_PAUSE_FRAME_KEY);
-      }
+      localStorage.setItem(STORAGE_FRAME_KEY, String(currentAnimFrame));
     } catch (e) {}
     return {
       ...previousState,
       isPaused: nextPaused,
-      pausedFrame: event.pausedFrame !== undefined ? event.pausedFrame : (nextPaused ? previousState.pausedFrame : null),
     };
   }
 
@@ -344,16 +412,21 @@ export const updateState = (event, previousState) => {
   if (event.type === 'AUDIO_STATUS_CHANGED') {
     const isPlaying = event.isPlaying;
     if (isPlaying && previousState.isPaused) {
+      try {
+        localStorage.setItem(STORAGE_PAUSE_KEY, 'false');
+      } catch (e) {}
       return {
         ...previousState,
         isPaused: false,
-        pausedFrame: null,
       };
     } else if (!isPlaying && !previousState.isPaused) {
+      try {
+        localStorage.setItem(STORAGE_PAUSE_KEY, 'true');
+        localStorage.setItem(STORAGE_FRAME_KEY, String(currentAnimFrame));
+      } catch (e) {}
       return {
         ...previousState,
         isPaused: true,
-        pausedFrame: event.pausedFrame || previousState.pausedFrame,
       };
     }
     return previousState;
@@ -419,7 +492,6 @@ export const render = (state, dispatch) => {
     cardHeight,
     flipped,
     isPaused,
-    pausedFrame,
     audioSync,
     opacity,
     shadow,
@@ -429,6 +501,14 @@ export const render = (state, dispatch) => {
 
   currentDispatch = dispatch;
   currentWidgetState = currentState;
+
+  // Manage Animation Playback State
+  if (!isPaused) {
+    startAnimation();
+  } else {
+    stopAnimation();
+    drawFrame(currentAnimFrame);
+  }
 
   // Manage Audio Sync Polling (fast 200ms responsive loop)
   if (audioSync && !audioTimer) {
@@ -500,28 +580,6 @@ export const render = (state, dispatch) => {
     dispatch({ type: 'TOGGLE_FLIP' });
   };
 
-  const handleTogglePause = () => {
-    if (!isPaused) {
-      let frameData = null;
-      try {
-        const img = document.getElementById('sticker-spiderman-img');
-        if (img) {
-          const canvas = document.createElement('canvas');
-          canvas.width = img.naturalWidth || BASE_WIDTH;
-          canvas.height = img.naturalHeight || BASE_HEIGHT;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0);
-          frameData = canvas.toDataURL('image/png');
-        }
-      } catch (err) {
-        console.warn('Sticker freeze frame capture note:', err);
-      }
-      dispatch({ type: 'TOGGLE_PAUSE', pausedFrame: frameData });
-    } else {
-      dispatch({ type: 'TOGGLE_PAUSE', pausedFrame: null });
-    }
-  };
-
   const handleContextMenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -552,7 +610,7 @@ export const render = (state, dispatch) => {
         } else if (res.action === 'SET_FLIP') {
           dispatch({ type: 'SET_FLIP', flipped: res.flipped });
         } else if (res.action === 'TOGGLE_PAUSE') {
-          handleTogglePause();
+          dispatch({ type: 'TOGGLE_PAUSE' });
         } else if (res.action === 'TOGGLE_AUDIO_SYNC') {
           dispatch({ type: 'TOGGLE_AUDIO_SYNC' });
         } else if (res.action === 'SET_OPACITY') {
@@ -611,12 +669,10 @@ export const render = (state, dispatch) => {
           onContextMenu={handleContextMenu}
           title="Spider-Man Sticker (Drag to move, Double-click to flip, Right-click for options)"
         >
-          <img
-            id="sticker-spiderman-img"
-            src={isPaused && pausedFrame ? pausedFrame : 'sticker.widget/spiderman.webp'}
-            alt="Spider-Man Sticker"
-            draggable={false}
-            onDragStart={(e) => e.preventDefault()}
+          <canvas
+            id="sticker-canvas"
+            width={BASE_WIDTH}
+            height={BASE_HEIGHT}
             style={{
               width: '100%',
               height: '100%',
@@ -624,7 +680,7 @@ export const render = (state, dispatch) => {
               pointerEvents: 'none',
               userSelect: 'none',
               WebkitUserSelect: 'none',
-              WebkitUserDrag: 'none',
+              imageRendering: '-webkit-optimize-contrast',
             }}
           />
         </div>
