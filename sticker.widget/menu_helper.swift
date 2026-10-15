@@ -127,6 +127,25 @@ menu.addItem(opParent)
 
 menu.addItem(NSMenuItem.separator())
 
+// Order Submenu
+let orderParent = NSMenuItem(title: "Order", action: nil, keyEquivalent: "")
+let orderMenu = NSMenu(title: "Order")
+orderMenu.autoenablesItems = false
+let orderOptions: [(String, String)] = [
+    ("Bring to Front", "ORDER_FRONT"),
+    ("Bring Forward", "ORDER_FORWARD"),
+    ("Send Backward", "ORDER_BACKWARD"),
+    ("Send to Back", "ORDER_BACK")
+]
+for (label, act) in orderOptions {
+    let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    item.target = delegate
+    item.representedObject = "{\"action\":\"\(act)\"}"
+    orderMenu.addItem(item)
+}
+orderParent.submenu = orderMenu
+menu.addItem(orderParent)
+
 // Toggles
 let shadowItem = NSMenuItem(title: "Ambient Shadow", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 shadowItem.target = delegate

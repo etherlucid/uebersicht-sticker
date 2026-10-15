@@ -19,6 +19,61 @@ const STORAGE_OPACITY_KEY = 'sticker_widget_opacity';
 const STORAGE_SHADOW_KEY = 'sticker_widget_shadow';
 const STORAGE_SNAP_KEY = 'sticker_widget_snapping';
 
+const WIDGET_ORDER_KEY = 'uebersicht_widget_order';
+const DEFAULT_WIDGET_ORDER = ['sticker', 'cava', 'shell', 'nowplaying'];
+
+const getWidgetZIndex = (widgetId) => {
+  try {
+    const raw = localStorage.getItem(WIDGET_ORDER_KEY);
+    let order = raw ? JSON.parse(raw) : [...DEFAULT_WIDGET_ORDER];
+    if (!Array.isArray(order)) order = [...DEFAULT_WIDGET_ORDER];
+    let idx = order.indexOf(widgetId);
+    if (idx === -1) {
+      order.push(widgetId);
+      localStorage.setItem(WIDGET_ORDER_KEY, JSON.stringify(order));
+      idx = order.length - 1;
+    }
+    return 100 + idx * 50;
+  } catch (e) {
+    return 100;
+  }
+};
+
+const reorderWidget = (widgetId, action) => {
+  try {
+    const raw = localStorage.getItem(WIDGET_ORDER_KEY);
+    let order = raw ? JSON.parse(raw) : [...DEFAULT_WIDGET_ORDER];
+    if (!Array.isArray(order)) order = [...DEFAULT_WIDGET_ORDER];
+    if (!order.includes(widgetId)) {
+      order.push(widgetId);
+    }
+    const idx = order.indexOf(widgetId);
+    if (action === 'ORDER_FRONT' || action === 'BRING_TO_FRONT') {
+      order.splice(idx, 1);
+      order.push(widgetId);
+    } else if (action === 'ORDER_BACK' || action === 'SEND_TO_BACK') {
+      order.splice(idx, 1);
+      order.unshift(widgetId);
+    } else if (action === 'ORDER_FORWARD' || action === 'BRING_FORWARD') {
+      if (idx < order.length - 1) {
+        const temp = order[idx];
+        order[idx] = order[idx + 1];
+        order[idx + 1] = temp;
+      }
+    } else if (action === 'ORDER_BACKWARD' || action === 'SEND_BACKWARD') {
+      if (idx > 0) {
+        const temp = order[idx];
+        order[idx] = order[idx - 1];
+        order[idx - 1] = temp;
+      }
+    }
+    localStorage.setItem(WIDGET_ORDER_KEY, JSON.stringify(order));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('uebersicht:order-changed', { detail: { order } }));
+    }
+  } catch (e) {}
+};
+
 const SCREEN_MARGIN = 0;
 const SNAP_THRESHOLD = 6;
 const SNAP_EDGE_TOLERANCE = 3;
@@ -479,8 +534,24 @@ export const updateState = (event, previousState) => {
     };
   }
 
+  if (event.type === 'ORDER_CHANGED') {
+    return {
+      ...previousState,
+      orderTick: Date.now(),
+    };
+  }
+
   return previousState;
 };
+
+if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_sticker) {
+  window.__uebersicht_order_listener_sticker = true;
+  window.addEventListener('uebersicht:order-changed', () => {
+    if (currentDispatch) {
+      currentDispatch({ type: 'ORDER_CHANGED' });
+    }
+  });
+}
 
 export const render = (state, dispatch) => {
   const currentState = state && typeof state.x === 'number' ? state : initialState;
@@ -621,6 +692,9 @@ export const render = (state, dispatch) => {
           dispatch({ type: 'TOGGLE_SNAPPING' });
         } else if (res.action === 'RESET_POSITION') {
           dispatch({ type: 'RESET_POSITION' });
+        } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
+          reorderWidget('sticker', res.action);
+          dispatch({ type: 'ORDER_CHANGED' });
         }
       } catch (parseErr) {}
     });
@@ -636,7 +710,7 @@ export const render = (state, dispatch) => {
     height: `${cardHeight + SHADOW_PAD * 2}px`,
     padding: `${SHADOW_PAD}px`,
     boxSizing: 'border-box',
-    zIndex: 100,
+    zIndex: isDragging ? 9999 : getWidgetZIndex('sticker'),
     pointerEvents: 'none',
     userSelect: 'none',
     WebkitUserSelect: 'none',
