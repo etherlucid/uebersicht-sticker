@@ -180,7 +180,7 @@ const drawCanvasFrame = (instanceId, stickerPath, frameIndex) => {
   const destH = Math.round(cardH * dpr);
 
   const isDragging = Boolean(currentWidgetState?.isDragging && currentWidgetState?.draggingInstanceId === instanceId);
-  const showShadow = currentWidgetState?.shadow !== false && !isDragging;
+  const showShadow = inst?.shadow !== false && !isDragging;
 
   ctx.clearRect(0, 0, targetW, targetH);
 
@@ -258,7 +258,11 @@ const ensureAnimLoopRunning = () => {
 
 const checkAudio = () => {
   if (isCheckingAudio) return;
-  if (!currentWidgetState || !currentWidgetState.audioSync || !currentDispatch) return;
+  if (!currentWidgetState || !currentDispatch) return;
+
+  const instances = currentWidgetState.instances || [];
+  const audioSyncInstances = instances.filter((inst) => inst.sticker && inst.audioSync);
+  if (audioSyncInstances.length === 0) return;
 
   isCheckingAudio = true;
   const audioCheckPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/audio_check';
@@ -269,20 +273,10 @@ const checkAudio = () => {
     isCheckingAudio = false;
     if (err || !output) return;
     const isPlaying = output.trim() === '1';
-    const state = currentWidgetState;
-    if (!state || !state.audioSync) return;
 
-    const instances = state.instances || [];
-    if (isPlaying) {
-      const anyPaused = instances.some((inst) => inst.sticker && inst.isPaused);
-      if (anyPaused) {
-        currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: true });
-      }
-    } else {
-      const anyPlaying = instances.some((inst) => inst.sticker && !inst.isPaused);
-      if (anyPlaying) {
-        currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying: false });
-      }
+    const needsUpdate = audioSyncInstances.some((inst) => isPlaying ? inst.isPaused : !inst.isPaused);
+    if (needsUpdate) {
+      currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying });
     }
   });
 };
@@ -625,34 +619,30 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'TOGGLE_AUDIO_SYNC') {
-    const nextSync = !previousState.audioSync;
-    try {
-      localStorage.setItem(STORAGE_AUDIO_SYNC_KEY, String(nextSync));
-    } catch (e) {}
-
-    let updatedInstances = previousState.instances;
-    if (!nextSync && updatedInstances) {
-      updatedInstances = updatedInstances.map((inst) => {
-        if (inst.isPaused) {
-          if (animFrameState[inst.id]) animFrameState[inst.id].lastFrameTimestamp = performance.now();
-          return { ...inst, isPaused: false };
-        }
-        return inst;
-      });
-      saveInstances(updatedInstances);
-    }
-
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+        const nextSync = !inst.audioSync;
+        return {
+          ...inst,
+          audioSync: nextSync,
+          isPaused: nextSync ? inst.isPaused : false,
+        };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
+    setTimeout(checkAudio, 10);
     return {
       ...previousState,
-      audioSync: nextSync,
-      instances: updatedInstances || previousState.instances,
+      instances: updatedInstances,
     };
   }
 
   if (event.type === 'AUDIO_STATUS_CHANGED') {
     const isPlaying = event.isPlaying;
     const updatedInstances = (previousState.instances || []).map((inst) => {
-      if (inst.sticker) {
+      if (inst.sticker && inst.audioSync) {
         if (isPlaying && inst.isPaused && animFrameState[inst.id]) {
           animFrameState[inst.id].lastFrameTimestamp = performance.now();
         }
@@ -733,23 +723,70 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'SET_OPACITY') {
-    try {
-      localStorage.setItem(STORAGE_OPACITY_KEY, String(event.opacity));
-    } catch (e) {}
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+        return { ...inst, opacity: event.opacity };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
     return {
       ...previousState,
-      opacity: event.opacity,
+      instances: updatedInstances,
     };
   }
 
   if (event.type === 'TOGGLE_SHADOW') {
-    const nextShadow = !previousState.shadow;
-    try {
-      localStorage.setItem(STORAGE_SHADOW_KEY, String(nextShadow));
-    } catch (e) {}
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+        return {
+          ...inst,
+          shadow: inst.shadow === false ? true : false,
+        };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
+    setTimeout(() => {
+      const target = updatedInstances.find((i) => i.id === targetId);
+      if (target && target.sticker) {
+        drawCanvasFrame(targetId, target.sticker, animFrameState[targetId]?.currentFrame ?? 0);
+      }
+    }, 0);
     return {
       ...previousState,
-      shadow: nextShadow,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'ORDER_FRONT' || event.type === 'ORDER_FORWARD' || event.type === 'ORDER_BACKWARD' || event.type === 'ORDER_BACK') {
+    const targetId = event.instanceId;
+    let updatedInstances = [...(previousState.instances || [])];
+    const idx = updatedInstances.findIndex((i) => i.id === targetId);
+
+    if (idx !== -1) {
+      const [target] = updatedInstances.splice(idx, 1);
+      if (event.type === 'ORDER_FRONT') {
+        updatedInstances.push(target);
+      } else if (event.type === 'ORDER_BACK') {
+        updatedInstances.unshift(target);
+      } else if (event.type === 'ORDER_FORWARD') {
+        const nextIdx = Math.min(updatedInstances.length, idx + 1);
+        updatedInstances.splice(nextIdx, 0, target);
+      } else if (event.type === 'ORDER_BACKWARD') {
+        const prevIdx = Math.max(0, idx - 1);
+        updatedInstances.splice(prevIdx, 0, target);
+      }
+      saveInstances(updatedInstances);
+    }
+
+    reorderWidget('sticker', event.type);
+
+    return {
+      ...previousState,
+      instances: updatedInstances,
     };
   }
 
@@ -875,18 +912,19 @@ export const render = (state, dispatch) => {
   // Ensure sprite sheet animation loop is running
   ensureAnimLoopRunning();
 
-  // Manage Audio Sync Polling (fast 200ms responsive loop)
-  if (audioSync && !audioTimer) {
-    audioTimer = setInterval(checkAudio, 200);
-    checkAudio();
-  } else if (!audioSync && audioTimer) {
-    clearInterval(audioTimer);
-    audioTimer = null;
-  }
-
   let instances = (currentState && currentState.instances && currentState.instances.length > 0)
     ? currentState.instances
     : getInitialInstances();
+
+  // Manage Audio Sync Polling (fast 200ms responsive loop)
+  const hasAudioSync = instances.some((inst) => inst.sticker && inst.audioSync);
+  if (hasAudioSync && !audioTimer) {
+    audioTimer = setInterval(checkAudio, 200);
+    checkAudio();
+  } else if (!hasAudioSync && audioTimer) {
+    clearInterval(audioTimer);
+    audioTimer = null;
+  }
 
   if (typeof localStorage !== 'undefined' && localStorage.getItem('sticker_force_blank_once') === 'true') {
     localStorage.removeItem('sticker_force_blank_once');
@@ -1027,9 +1065,9 @@ export const render = (state, dispatch) => {
       scale: instance.scale || 1.0,
       flipped: Boolean(instance.flipped),
       isPaused: Boolean(instance.isPaused),
-      audioSync: Boolean(currentState.audioSync),
-      opacity: opacity !== undefined ? opacity : 1.0,
-      shadow: shadow !== false,
+      audioSync: Boolean(instance.audioSync),
+      opacity: instance.opacity !== undefined ? instance.opacity : 1.0,
+      shadow: instance.shadow !== false,
       enableSnapping: enableSnapping !== false,
       x: Math.round(instance.x ?? 100),
       y: Math.round(instance.y ?? 100),
@@ -1091,11 +1129,11 @@ export const render = (state, dispatch) => {
           const targetInstId = res.instanceId || instance.id;
           dispatch({ type: 'TOGGLE_PAUSE', instanceId: targetInstId });
         } else if (res.action === 'TOGGLE_AUDIO_SYNC') {
-          dispatch({ type: 'TOGGLE_AUDIO_SYNC' });
+          dispatch({ type: 'TOGGLE_AUDIO_SYNC', instanceId: res.instanceId || instance.id });
         } else if (res.action === 'SET_OPACITY') {
-          dispatch({ type: 'SET_OPACITY', opacity: res.opacity });
+          dispatch({ type: 'SET_OPACITY', instanceId: res.instanceId || instance.id, opacity: res.opacity });
         } else if (res.action === 'TOGGLE_SHADOW') {
-          dispatch({ type: 'TOGGLE_SHADOW' });
+          dispatch({ type: 'TOGGLE_SHADOW', instanceId: res.instanceId || instance.id });
         } else if (res.action === 'TOGGLE_SNAPPING') {
           dispatch({ type: 'TOGGLE_SNAPPING' });
         } else if (res.action === 'RESET_POSITION') {
@@ -1108,8 +1146,7 @@ export const render = (state, dispatch) => {
         } else if (res.action === 'DUPLICATE_WIDGET') {
           dispatch({ type: 'DUPLICATE_WIDGET', instanceId: res.instanceId || instance.id });
         } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
-          reorderWidget('sticker', res.action);
-          dispatch({ type: 'ORDER_CHANGED' });
+          dispatch({ type: res.action, instanceId: res.instanceId || instance.id });
         }
       } catch (parseErr) {}
     });
@@ -1128,7 +1165,7 @@ export const render = (state, dispatch) => {
 
   return (
     <div className="sticker-root">
-      {instances.map((instance) => {
+      {instances.map((instance, index) => {
         const hasSticker = Boolean(instance.sticker);
         const meta = hasSticker ? stickerMetaCache[instance.sticker] : null;
 
@@ -1262,7 +1299,7 @@ export const render = (state, dispatch) => {
           width: `${instCardW}px`,
           height: `${instCardH}px`,
           boxSizing: 'border-box',
-          zIndex: isDragging ? 9999 : getWidgetZIndex('sticker'),
+          zIndex: isDragging ? 9999 : (getWidgetZIndex('sticker') + index),
           pointerEvents: 'auto',
           userSelect: 'none',
           WebkitUserSelect: 'none',
@@ -1285,6 +1322,7 @@ export const render = (state, dispatch) => {
           pointerEvents: 'auto',
         };
 
+        const instOpacity = instance.opacity !== undefined ? instance.opacity : 1.0;
         const stickerStyle = {
           position: 'relative',
           width: '100%',
@@ -1292,7 +1330,7 @@ export const render = (state, dispatch) => {
           pointerEvents: 'auto',
           cursor: isDragging ? 'grabbing' : 'grab',
           transform: instFlipped ? 'scaleX(-1)' : 'none',
-          opacity: opacity,
+          opacity: instOpacity,
           transition: isDragging ? 'none' : 'opacity 0.2s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
         };
 

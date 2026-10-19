@@ -864,7 +864,7 @@ if hasSticker {
     for (label, val) in opacityOptions {
         let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
         item.target = delegate
-        item.representedObject = "{\"action\":\"SET_OPACITY\",\"opacity\":\(val)}"
+        item.representedObject = "{\"action\":\"SET_OPACITY\",\"instanceId\":\"\(instanceId)\",\"opacity\":\(val)}"
         if abs(currentOpacity - val) < 0.01 {
             item.state = .on
         }
@@ -907,7 +907,7 @@ let orderOptions: [(String, String)] = [
 for (label, act) in orderOptions {
     let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
     item.target = delegate
-    item.representedObject = "{\"action\":\"\(act)\"}"
+    item.representedObject = "{\"action\":\"\(act)\",\"instanceId\":\"\(instanceId)\"}"
     orderMenu.addItem(item)
 }
 orderParent.submenu = orderMenu
@@ -917,7 +917,7 @@ if hasSticker {
     let hasShadow = state.shadow ?? true
     let shadowItem = NSMenuItem(title: "Ambient Shadow", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
     shadowItem.target = delegate
-    shadowItem.representedObject = "{\"action\":\"TOGGLE_SHADOW\"}"
+    shadowItem.representedObject = "{\"action\":\"TOGGLE_SHADOW\",\"instanceId\":\"\(instanceId)\"}"
     if hasShadow { shadowItem.state = .on }
     menu.addItem(shadowItem)
 }
