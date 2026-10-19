@@ -216,9 +216,9 @@ func reloadWidget(widgetId: String) {
 // MARK: - Background Cutout Studio
 
 enum CutoutMode: Int {
-    case smartAI = 0
+    case original = 0
     case colorKey = 1
-    case original = 2
+    case smartAI = 2
 }
 
 class CheckerboardView: NSView {
@@ -453,11 +453,13 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
     var isPlaying: Bool = false
     var playbackTimer: Timer?
 
-    var cutoutMode: CutoutMode = .colorKey
+    var cutoutMode: CutoutMode = .original
     var targetColor: (r: UInt8, g: UInt8, b: UInt8) = (255, 255, 255)
     var tolerance: Float = 0.15
     var smoothness: Float = 0.05
 
+    var isStandalone: Bool = false
+    var onComplete: ((String?) -> Void)?
     var outputAction: String?
 
     init(sourcePath: String, widgetDir: String, instanceId: String) {
@@ -581,16 +583,17 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
         modeLabel.textColor = NSColor(white: 0.5, alpha: 0.9)
         sideView.addSubview(modeLabel)
 
-        modeSegmented = NSSegmentedControl(labels: ["🪄 Smart AI", "🎯 Color Key", "⭕ Original"], trackingMode: .selectOne, target: self, action: #selector(modeChanged))
+        modeSegmented = NSSegmentedControl(labels: ["⭕ Original", "🎯 Color Key", "🪄 Smart AI"], trackingMode: .selectOne, target: self, action: #selector(modeChanged))
         modeSegmented.frame = NSRect(x: 14, y: sideH - 68, width: sideW - 28, height: 26)
         modeSegmented.autoresizingMask = [.minYMargin]
-        modeSegmented.selectedSegment = CutoutMode.colorKey.rawValue
+        modeSegmented.selectedSegment = CutoutMode.original.rawValue
         sideView.addSubview(modeSegmented)
 
         // Color Key Container View
         let containerH = sideH - 74 - 58
         colorContainer = NSView(frame: NSRect(x: 0, y: 58, width: sideW, height: containerH))
         colorContainer.autoresizingMask = [.minYMargin, .height]
+        colorContainer.isHidden = true
         sideView.addSubview(colorContainer)
 
         let targetColorTitle = NSTextField(frame: NSRect(x: 16, y: containerH - 26, width: sideW - 32, height: 16))
@@ -703,7 +706,7 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
         // Original Container View
         originalContainer = NSView(frame: NSRect(x: 0, y: 58, width: sideW, height: containerH))
         originalContainer.autoresizingMask = [.minYMargin, .height]
-        originalContainer.isHidden = true
+        originalContainer.isHidden = false
         sideView.addSubview(originalContainer)
 
         let origCard = NSView(frame: NSRect(x: 14, y: containerH - 110, width: sideW - 28, height: 90))
@@ -817,7 +820,7 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
     }
 
     @objc func modeChanged() {
-        cutoutMode = CutoutMode(rawValue: modeSegmented.selectedSegment) ?? .colorKey
+        cutoutMode = CutoutMode(rawValue: modeSegmented.selectedSegment) ?? .original
         colorContainer.isHidden = (cutoutMode != .colorKey)
         aiContainer.isHidden = (cutoutMode != .smartAI)
         originalContainer.isHidden = (cutoutMode != .original)
@@ -924,8 +927,8 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
                 cleanBase = String(cleanBase.dropLast(7))
             }
             let suffix = (self.cutoutMode == .original) ? "" : "_cutout"
-
-            let destExt = self.isAnimated ? "gif" : "png"
+            let origExt = URL(fileURLWithPath: self.sourcePath).pathExtension.lowercased()
+            let destExt = (self.cutoutMode == .original) ? (origExt.isEmpty ? "png" : origExt) : (self.isAnimated ? "gif" : "png")
             let finalName = "\(cleanBase)\(suffix).\(destExt)"
             let destPath = (stickersDir as NSString).appendingPathComponent(finalName)
             let repoDestPath = (repoStickersDir as NSString).appendingPathComponent(finalName)
@@ -1001,14 +1004,19 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
         }
     }
 
-    func runModal() -> String? {
+    func showWindow() {
         playbackTimer?.invalidate()
-        let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
         setupDockIcon()
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func runModal() -> String? {
+        isStandalone = true
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        showWindow()
         NSApp.run()
         return outputAction
     }
@@ -1017,20 +1025,23 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
         playbackTimer?.invalidate()
         playbackTimer = nil
         window.orderOut(nil)
-        NSApp.stop(nil)
-        let dummy = NSEvent.otherEvent(
-            with: .applicationDefined,
-            location: .zero,
-            modifierFlags: [],
-            timestamp: 0,
-            windowNumber: 0,
-            context: nil,
-            subtype: 0,
-            data1: 0,
-            data2: 0
-        )
-        if let dummy = dummy {
-            NSApp.postEvent(dummy, atStart: true)
+        onComplete?(outputAction)
+        if isStandalone {
+            NSApp.stop(nil)
+            let dummy = NSEvent.otherEvent(
+                with: .applicationDefined,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                subtype: 0,
+                data1: 0,
+                data2: 0
+            )
+            if let dummy = dummy {
+                NSApp.postEvent(dummy, atStart: true)
+            }
         }
     }
 
@@ -1219,6 +1230,7 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     var filteredItems: [StickerItem] = []
     var outputAction: String?
     var deletedActiveSticker: Bool = false
+    var activeStudio: StickerCutoutStudioController?
 
     init(widgetDir: String, instanceId: String, currentSticker: String?) {
         self.widgetDir = widgetDir
@@ -1227,6 +1239,19 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         super.init()
         setupUI()
         loadStickers()
+    }
+
+    func openCutoutStudio(sourcePath: String) {
+        let studio = StickerCutoutStudioController(sourcePath: sourcePath, widgetDir: widgetDir, instanceId: instanceId)
+        studio.isStandalone = false
+        studio.onComplete = { [weak self] _ in
+            self?.loadStickers()
+            self?.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            self?.activeStudio = nil
+        }
+        self.activeStudio = studio
+        studio.showWindow()
     }
 
     func setupUI() {
@@ -1258,10 +1283,7 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
             let allowed: Set<String> = ["webp", "gif", "png", "jpg", "jpeg"]
             let validUrls = urls.filter { allowed.contains($0.pathExtension.lowercased()) }
             if validUrls.count == 1 {
-                _ = openStickerCutoutStudio(sourcePath: validUrls[0].path, widgetDir: self.widgetDir, instanceId: self.instanceId)
-                self.loadStickers()
-                self.window.makeKeyAndOrderFront(nil)
-                NSApp.activate(ignoringOtherApps: true)
+                self.openCutoutStudio(sourcePath: validUrls[0].path)
                 return
             } else {
                 for url in validUrls {
@@ -1269,8 +1291,6 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
                 }
             }
             self.loadStickers()
-            self.window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
         }
 
         // Top Toolbar Header View
@@ -1437,10 +1457,7 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
                     guard let self = self else { return }
                     let stickersDir = (self.widgetDir as NSString).appendingPathComponent("stickers")
                     let fullPath = (stickersDir as NSString).appendingPathComponent(toCutout.filename)
-                    _ = openStickerCutoutStudio(sourcePath: fullPath, widgetDir: self.widgetDir, instanceId: self.instanceId)
-                    self.loadStickers()
-                    self.window.makeKeyAndOrderFront(nil)
-                    NSApp.activate(ignoringOtherApps: true)
+                    self.openCutoutStudio(sourcePath: fullPath)
                 },
                 onDelete: { [weak self] toDelete in
                     self?.confirmDelete(toDelete)
@@ -1474,10 +1491,7 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
 
     @objc func addStickerClicked() {
         guard let src = chooseImageFile() else { return }
-        _ = openStickerCutoutStudio(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId)
-        loadStickers()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        openCutoutStudio(sourcePath: src)
     }
 
     func runModal() -> String? {
