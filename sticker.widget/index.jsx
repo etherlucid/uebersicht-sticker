@@ -332,16 +332,13 @@ const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap 
 };
 
 const getInitialPosition = (cardW, cardH) => {
-  const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
-  const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
-
   return {
-    x: Math.max(SNAP_MARGIN_X, winW - cardW - SNAP_MARGIN_X - 100),
-    y: Math.max(SNAP_MARGIN_TOP, winH - cardH - SNAP_MARGIN_BOTTOM - 60),
+    x: SNAP_MARGIN_X,
+    y: SNAP_MARGIN_TOP,
   };
 };
 
-const RESET_STICKERS_FLAG = 'sticker_reset_blank_plus_v4';
+const RESET_STICKERS_FLAG = 'sticker_reset_top_left_v5';
 try {
   if (typeof localStorage !== 'undefined') {
     if (localStorage.getItem(RESET_STICKERS_FLAG) !== 'done') {
@@ -770,15 +767,9 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'RESET_POSITION') {
-    const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
-    const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
     const targetId = event.instanceId;
-    const target = (previousState.instances || []).find((i) => i.id === targetId);
-    const cardW = target?.sticker ? Math.round((target.w || BASE_SIZE) * (target.scale || 1.0)) : BLANK_SQUARE_SIZE;
-    const cardH = target?.sticker ? Math.round((target.h || BASE_SIZE) * (target.scale || 1.0)) : BLANK_SQUARE_SIZE;
-
-    const defaultX = Math.max(SNAP_MARGIN_X, winW - cardW - SNAP_MARGIN_X - 100);
-    const defaultY = Math.max(SNAP_MARGIN_TOP, winH - cardH - SNAP_MARGIN_BOTTOM - 60);
+    const defaultX = SNAP_MARGIN_X;
+    const defaultY = SNAP_MARGIN_TOP;
 
     const updatedInstances = (previousState.instances || []).map((inst) => {
       if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
@@ -920,7 +911,7 @@ export const render = (state, dispatch) => {
     }
   }
 
-  debugLog(`RENDER: instances=${instances.length} stickers=${instances.map(i => i.sticker || 'blank').join(',')}`);
+  debugLog(`RENDER: instances=${instances.length} stickers=${instances.map(i => `${i.sticker || 'blank'}@(${i.x},${i.y})`).join(',')}`);
 
   const openStickerManagerHelper = (instId, currentSticker) => {
     const payload = JSON.stringify({
