@@ -251,21 +251,48 @@ func samplePixelColor(cgImage: CGImage, x: Int, y: Int) -> (r: UInt8, g: UInt8, 
     return (pixel[0], pixel[1], pixel[2])
 }
 
-func autoDetectCorners(cgImage: CGImage) -> (r: UInt8, g: UInt8, b: UInt8) {
-    let w = cgImage.width
-    let h = cgImage.height
+func robustDetectBackground(cgImage: CGImage) -> (r: UInt8, g: UInt8, b: UInt8) {
+    let w = cgImage.width, h = cgImage.height
     guard w > 2 && h > 2 else { return (255, 255, 255) }
-    let corners = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
-    var rSum = 0, gSum = 0, bSum = 0
-    var valid = 0
-    for (cx, cy) in corners {
-        if let p = samplePixelColor(cgImage: cgImage, x: cx, y: cy) {
-            rSum += Int(p.r); gSum += Int(p.g); bSum += Int(p.b)
-            valid += 1
+    var samples: [(r: UInt8, g: UInt8, b: UInt8)] = []
+    let xs = [0, w / 4, w / 2, 3 * w / 4, w - 1]
+    for x in xs {
+        if let p1 = samplePixelColor(cgImage: cgImage, x: x, y: 0) { samples.append(p1) }
+        if let p2 = samplePixelColor(cgImage: cgImage, x: x, y: h - 1) { samples.append(p2) }
+    }
+    for y in [h / 4, h / 2, 3 * h / 4] {
+        if let p1 = samplePixelColor(cgImage: cgImage, x: 0, y: y) { samples.append(p1) }
+        if let p2 = samplePixelColor(cgImage: cgImage, x: w - 1, y: y) { samples.append(p2) }
+    }
+    guard !samples.isEmpty else { return (255, 255, 255) }
+    var bestSample = samples[0]
+    var bestCount = 0
+    let thresh: Float = 40.0
+    for candidate in samples {
+        var count = 0
+        let cr = Float(candidate.r), cg = Float(candidate.g), cb = Float(candidate.b)
+        for other in samples {
+            let dr = Float(other.r) - cr
+            let dg = Float(other.g) - cg
+            let db = Float(other.b) - cb
+            if sqrt(dr*dr + dg*dg + db*db) <= thresh { count += 1 }
+        }
+        if count > bestCount {
+            bestCount = count
+            bestSample = candidate
         }
     }
-    if valid == 0 { return (255, 255, 255) }
-    return (UInt8(rSum / valid), UInt8(gSum / valid), UInt8(bSum / valid))
+    return bestSample
+}
+
+func autoDetectCorners(cgImage: CGImage) -> (r: UInt8, g: UInt8, b: UInt8) {
+    return robustDetectBackground(cgImage: cgImage)
+}
+
+func createTransparentImage(width: Int, height: Int) -> CGImage? {
+    let cs = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    return ctx.makeImage()
 }
 
 func removeBackgroundColor(
@@ -308,24 +335,35 @@ func removeBackgroundColor(
     return ctx.makeImage()
 }
 
-func removeBackgroundSmartAI(from cgImage: CGImage) -> CGImage? {
-    guard #available(macOS 14.0, *) else { return nil }
-    let req = VNGenerateForegroundInstanceMaskRequest()
-    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-    try? handler.perform([req])
-    guard let result = req.results?.first,
-          let maskBuffer = try? result.generateScaledMaskForImage(forInstances: result.allInstances, from: handler) else {
-        return nil
+func removeBackgroundSmartAI(
+    from cgImage: CGImage,
+    fallbackBgColor: (r: UInt8, g: UInt8, b: UInt8)? = nil,
+    tolerance: Float = 0.15,
+    smoothness: Float = 0.05
+) -> CGImage? {
+    if #available(macOS 14.0, *) {
+        let req = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        try? handler.perform([req])
+        if let result = req.results?.first, !result.allInstances.isEmpty,
+           let maskBuffer = try? result.generateScaledMaskForImage(forInstances: result.allInstances, from: handler) {
+            let ciInput = CIImage(cgImage: cgImage)
+            let ciMask = CIImage(cvPixelBuffer: maskBuffer)
+            let blend = CIFilter(name: "CIBlendWithMask")!
+            blend.setValue(ciInput, forKey: kCIInputImageKey)
+            blend.setValue(CIImage.empty(), forKey: kCIInputBackgroundImageKey)
+            blend.setValue(ciMask, forKey: kCIInputMaskImageKey)
+            if let out = blend.outputImage {
+                let ctx = CIContext(options: nil)
+                if let outCG = ctx.createCGImage(out, from: ciInput.extent) {
+                    return outCG
+                }
+            }
+        }
     }
-    let ciInput = CIImage(cgImage: cgImage)
-    let ciMask = CIImage(cvPixelBuffer: maskBuffer)
-    let blend = CIFilter(name: "CIBlendWithMask")!
-    blend.setValue(ciInput, forKey: kCIInputImageKey)
-    blend.setValue(CIImage.empty(), forKey: kCIInputBackgroundImageKey)
-    blend.setValue(ciMask, forKey: kCIInputMaskImageKey)
-    guard let out = blend.outputImage else { return nil }
-    let ctx = CIContext(options: nil)
-    return ctx.createCGImage(out, from: ciInput.extent)
+    // When the neural net finds no foreground instances (e.g. frame is mostly/all background):
+    let bg = fallbackBgColor ?? robustDetectBackground(cgImage: cgImage)
+    return removeBackgroundColor(from: cgImage, targetR: bg.r, targetG: bg.g, targetB: bg.b, tolerance: tolerance, smoothness: smoothness)
 }
 
 func saveStaticPNG(cgImage: CGImage, destURL: URL) -> Bool {
@@ -895,7 +933,7 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
                 smoothness: smoothness
             )
         case .smartAI:
-            outputCG = removeBackgroundSmartAI(from: currentCG) ?? currentCG
+            outputCG = removeBackgroundSmartAI(from: currentCG, tolerance: tolerance, smoothness: smoothness) ?? createTransparentImage(width: currentCG.width, height: currentCG.height)
         }
 
         if let cg = outputCG {
@@ -947,8 +985,10 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
                 var processed: [CGImage] = []
                 for frame in self.frames {
                     if self.cutoutMode == .smartAI {
-                        if let out = removeBackgroundSmartAI(from: frame) {
+                        if let out = removeBackgroundSmartAI(from: frame, tolerance: self.tolerance, smoothness: self.smoothness) {
                             processed.append(out)
+                        } else if let clear = createTransparentImage(width: frame.width, height: frame.height) {
+                            processed.append(clear)
                         } else {
                             processed.append(frame)
                         }
@@ -1244,7 +1284,10 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     func openCutoutStudio(sourcePath: String) {
         let studio = StickerCutoutStudioController(sourcePath: sourcePath, widgetDir: widgetDir, instanceId: instanceId)
         studio.isStandalone = false
-        studio.onComplete = { [weak self] _ in
+        studio.onComplete = { [weak self] resultAction in
+            if let resultAction = resultAction {
+                self?.outputAction = resultAction
+            }
             self?.loadStickers()
             self?.window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
