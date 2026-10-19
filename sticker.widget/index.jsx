@@ -341,7 +341,7 @@ const getInitialPosition = (cardW, cardH) => {
   };
 };
 
-const RESET_STICKERS_FLAG = 'sticker_reset_blank_plus_v3';
+const RESET_STICKERS_FLAG = 'sticker_reset_blank_plus_v4';
 try {
   if (typeof localStorage !== 'undefined') {
     if (localStorage.getItem(RESET_STICKERS_FLAG) !== 'done') {
@@ -1325,7 +1325,7 @@ export const render = (state, dispatch) => {
                   }
                 }}
                 onContextMenu={(e) => handleContextMenu(instance, e)}
-                title="Click to select WebP Sticker (or drag to position, right-click for options)"
+                title="Click to select Sticker (GIF, WebP, PNG) (or drag to position, right-click for options)"
               >
                 <svg
                   className="sticker-plus-icon"
@@ -1348,7 +1348,7 @@ export const render = (state, dispatch) => {
                 </svg>
               </div>
             ) : (
-              /* Active WebP Sticker Box */
+              /* Active Sticker Box */
               <div
                 id={`sticker-interactive-${instance.id}`}
                 style={stickerStyle}

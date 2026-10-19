@@ -58,12 +58,12 @@ func setupDockIcon() {
     NSApplication.shared.applicationIconImage = icon
 }
 
-func chooseWebPFile() -> String? {
+func chooseImageFile() -> String? {
     let script = """
     tell application "System Events"
         activate
         try
-            set f to choose file of type {"org.webmproject.webp", "webp"} with prompt "Select a WebP Sticker"
+            set f to choose file of type {"org.webmproject.webp", "webp", "com.compuserve.gif", "gif", "public.png", "png", "public.jpeg", "jpg", "jpeg"} with prompt "Select a Sticker (GIF, WebP, PNG, JPG)"
             return POSIX path of f
         on error
             return ""
@@ -80,7 +80,11 @@ func chooseWebPFile() -> String? {
     return nil
 }
 
-func importWebP(sourcePath: String, widgetDir: String, instanceId: String) -> String? {
+func chooseWebPFile() -> String? {
+    return chooseImageFile()
+}
+
+func importSticker(sourcePath: String, widgetDir: String, instanceId: String) -> String? {
     let fileManager = FileManager.default
     let stickersDir = (widgetDir as NSString).appendingPathComponent("stickers")
     try? fileManager.createDirectory(atPath: stickersDir, withIntermediateDirectories: true)
@@ -132,9 +136,13 @@ func importWebP(sourcePath: String, widgetDir: String, instanceId: String) -> St
     }
 }
 
+func importWebP(sourcePath: String, widgetDir: String, instanceId: String) -> String? {
+    return importSticker(sourcePath: sourcePath, widgetDir: widgetDir, instanceId: instanceId)
+}
+
 func pickAndImport(widgetDir: String, instanceId: String) -> String? {
-    guard let src = chooseWebPFile() else { return nil }
-    return importWebP(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId)
+    guard let src = chooseImageFile() else { return nil }
+    return importSticker(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId)
 }
 
 func getLocalStickers(widgetDir: String) -> [(filename: String, title: String, relPath: String)] {
@@ -143,8 +151,16 @@ func getLocalStickers(widgetDir: String) -> [(filename: String, title: String, r
     guard let files = try? fileManager.contentsOfDirectory(atPath: stickersDir) else {
         return []
     }
+    let allowedExtensions: Set<String> = ["webp", "gif", "png", "jpg", "jpeg"]
     return files
-        .filter { $0.lowercased().hasSuffix(".webp") && !$0.lowercased().hasSuffix("_sheet.webp") && !$0.hasPrefix(".") }
+        .filter { file in
+            let lower = file.lowercased()
+            if lower.hasPrefix(".") || lower.hasSuffix("_sheet.webp") || lower.hasSuffix("_meta.json") {
+                return false
+            }
+            let ext = (lower as NSString).pathExtension
+            return allowedExtensions.contains(ext)
+        }
         .sorted()
         .map { filename in
             let rawTitle = (filename as NSString).deletingPathExtension
@@ -170,10 +186,12 @@ func removeStickerFiles(stickerRelPath: String, widgetDir: String) {
     for dir in dirsToCheck {
         guard let files = try? fileManager.contentsOfDirectory(atPath: dir) else { continue }
         for f in files {
+            let fBase = (f as NSString).deletingPathExtension
             if f == filename ||
-               f == "\(baseName).webp" ||
                f == "\(baseName)_sheet.webp" ||
-               f == "\(baseName)_meta.json" {
+               f == "\(baseName)_meta.json" ||
+               fBase == baseName ||
+               fBase == "\(baseName)_sheet" {
                 let fullPath = (dir as NSString).appendingPathComponent(f)
                 try? fileManager.removeItem(atPath: fullPath)
             }
@@ -381,10 +399,11 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
 
         backgroundView.onDropFiles = { [weak self] urls in
             guard let self = self else { return }
+            let allowed: Set<String> = ["webp", "gif", "png", "jpg", "jpeg"]
             for url in urls {
                 let ext = url.pathExtension.lowercased()
-                if ext == "webp" || ext == "gif" {
-                    _ = importWebP(sourcePath: url.path, widgetDir: self.widgetDir, instanceId: self.instanceId)
+                if allowed.contains(ext) {
+                    _ = importSticker(sourcePath: url.path, widgetDir: self.widgetDir, instanceId: self.instanceId)
                 }
             }
             self.loadStickers()
@@ -500,7 +519,7 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
             countLabel.stringValue = "\(filteredItems.count) of \(allItems.count)"
         }
 
-        statusLabel.stringValue = "Drag & drop WebP files anywhere into this window to import"
+        statusLabel.stringValue = "Drag & drop GIF, WebP, or PNG files anywhere into this window to import"
         layoutGrid()
     }
 
@@ -516,7 +535,7 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
             msgLabel.alignment = .center
             msgLabel.textColor = NSColor(white: 0.55, alpha: 0.9)
             if allItems.isEmpty {
-                msgLabel.stringValue = "No stickers in library yet.\nClick '+ Add Sticker…' or drag & drop WebP files here."
+                msgLabel.stringValue = "No stickers in library yet.\nClick '+ Add Sticker…' or drag & drop GIF, WebP, or PNG files here."
             } else {
                 msgLabel.stringValue = "No stickers matching \"\(searchField.stringValue)\""
             }
