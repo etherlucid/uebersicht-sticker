@@ -76,6 +76,7 @@ const SNAP_MARGIN_BOTTOM = 14;
 
 let lastClickTimestamp = 0;
 let lastContextMenuTimestamp = 0;
+let lastPlusClickTimestamp = 0;
 let audioTimer = null;
 let isCheckingAudio = false;
 
@@ -963,7 +964,15 @@ export const render = (state, dispatch) => {
   };
 
   const handlePlusClick = (instanceId, e) => {
+    debugLog(`handlePlusClick: instanceId=${instanceId}`);
     if (e && e.stopPropagation) e.stopPropagation();
+    const now = Date.now();
+    if (now - lastPlusClickTimestamp < 400) {
+      debugLog('handlePlusClick: debounced');
+      return;
+    }
+    lastPlusClickTimestamp = now;
+
     const payload = JSON.stringify({
       mode: 'PLUS_CLICK',
       instanceId,
@@ -974,7 +983,9 @@ export const render = (state, dispatch) => {
     const escapedPayload = payload.replace(/'/g, "'\\''");
     const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
 
+    debugLog(`handlePlusClick: running cmd`);
     run(cmd, (err, output) => {
+      debugLog(`handlePlusClick: callback err=${err} output=${output ? output.trim() : 'NONE'}`);
       if (err || !output) return;
       try {
         const res = JSON.parse(output.trim());
@@ -1211,7 +1222,7 @@ export const render = (state, dispatch) => {
             const dy = moveEvent.clientY - startY;
 
             if (!hasMoved) {
-              if (Math.hypot(dx, dy) > 4) {
+              if (Math.hypot(dx, dy) > 8) {
                 hasMoved = true;
                 dispatch({
                   type: 'START_DRAG',
@@ -1237,14 +1248,15 @@ export const render = (state, dispatch) => {
             }
           };
 
-          const handleMouseUp = () => {
+          const handleMouseUp = (upEvent) => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
+            debugLog(`handleMouseUp: id=${instance.id} hasMoved=${hasMoved} hasSticker=${hasSticker}`);
             if (hasMoved) {
               dispatch({ type: 'END_DRAG' });
             } else if (!hasSticker) {
               // Clicked without dragging on blank square: open picker / menu!
-              handlePlusClick(instance.id, e);
+              handlePlusClick(instance.id, upEvent || e);
             }
           };
 
@@ -1306,6 +1318,12 @@ export const render = (state, dispatch) => {
                 className="sticker-blank-square"
                 style={blankSquareStyle}
                 onMouseDown={handleMouseDown}
+                onClick={(clickEvent) => {
+                  debugLog(`blankSquare onClick: hasSticker=${hasSticker}`);
+                  if (!hasSticker) {
+                    handlePlusClick(instance.id, clickEvent);
+                  }
+                }}
                 onContextMenu={(e) => handleContextMenu(instance, e)}
                 title="Click to select WebP Sticker (or drag to position, right-click for options)"
               >
