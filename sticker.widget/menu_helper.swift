@@ -632,23 +632,25 @@ func openStickerManager(widgetDir: String, instanceId: String, currentSticker: S
     return controller.runModal()
 }
 
+func logHelper(_ msg: String) {
+    let line = "[\(Date())] \(msg)\n"
+    if let handle = FileHandle(forWritingAtPath: "/tmp/sticker_helper.log") {
+        handle.seekToEndOfFile()
+        if let d = line.data(using: .utf8) { handle.write(d) }
+        try? handle.synchronize()
+        handle.closeFile()
+    } else {
+        try? line.write(toFile: "/tmp/sticker_helper.log", atomically: true, encoding: .utf8)
+    }
+}
+
 @discardableResult
 func popUpMenuAtMouse(menu: NSMenu) -> Bool {
-    let mouseLoc = NSEvent.mouseLocation
-    let win = NSWindow(
-        contentRect: NSRect(x: mouseLoc.x, y: mouseLoc.y, width: 1, height: 1),
-        styleMask: .borderless,
-        backing: .buffered,
-        defer: false
-    )
-    win.isOpaque = false
-    win.backgroundColor = .clear
-    win.level = .popUpMenu
-    win.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
-
-    let result = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: win.contentView)
-    win.orderOut(nil)
+    let mouseLoc = NSEvent.mouseLocation
+    logHelper("popUpMenuAtMouse: mouseLoc=\(mouseLoc)")
+    let result = menu.popUp(positioning: nil, at: mouseLoc, in: nil)
+    logHelper("popUpMenuAtMouse result=\(result), outputAction=\(delegate.outputAction ?? "nil")")
     return result
 }
 
@@ -674,6 +676,8 @@ let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-j
 let mode = state.mode ?? "CONTEXT_MENU"
 let instanceId = state.instanceId ?? "default"
 let localStickers = getLocalStickers(widgetDir: widgetDir)
+
+logHelper("MAIN: mode=\(mode) instanceId=\(instanceId) localStickers=\(localStickers.count)")
 
 if mode == "PICK_ONLY" {
     if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {

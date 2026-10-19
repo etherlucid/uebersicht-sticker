@@ -78,6 +78,12 @@ let lastClickTimestamp = 0;
 let lastContextMenuTimestamp = 0;
 let audioTimer = null;
 let isCheckingAudio = false;
+
+const debugLog = (msg) => {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] ${msg}\n`.replace(/'/g, "'\\''");
+  run(`printf '%s' '${line}' >> /tmp/sticker_debug.log 2>/dev/null`);
+};
 let currentDispatch = null;
 let currentWidgetState = null;
 
@@ -863,6 +869,8 @@ export const render = (state, dispatch) => {
         h: BASE_SIZE,
       }];
 
+  debugLog(`RENDER: instances=${instances.length} stickers=${instances.map(i => i.sticker || 'blank').join(',')}`);
+
   const openStickerManagerHelper = (instId, currentSticker) => {
     const payload = JSON.stringify({
       mode: 'MANAGER',
@@ -871,8 +879,9 @@ export const render = (state, dispatch) => {
     });
     const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
     const fallbackPath = './sticker.widget/menu_helper';
+    const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
     const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
 
     run(cmd, (err, output) => {
       if (err || !output) return;
@@ -911,8 +920,9 @@ export const render = (state, dispatch) => {
     });
     const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
     const fallbackPath = './sticker.widget/menu_helper';
+    const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
     const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
 
     run(cmd, (err, output) => {
       if (err || !output) return;
@@ -946,12 +956,16 @@ export const render = (state, dispatch) => {
   };
 
   const handleContextMenu = (instance, e) => {
+    debugLog(`handleContextMenu: id=${instance.id} sticker=${instance.sticker}`);
     if (e) {
       if (e.preventDefault) e.preventDefault();
       if (e.stopPropagation) e.stopPropagation();
     }
     const now = Date.now();
-    if (now - lastContextMenuTimestamp < 350) return;
+    if (now - lastContextMenuTimestamp < 350) {
+      debugLog('handleContextMenu: debounced');
+      return;
+    }
     lastContextMenuTimestamp = now;
 
     const payload = JSON.stringify({
@@ -965,16 +979,19 @@ export const render = (state, dispatch) => {
       opacity: opacity !== undefined ? opacity : 1.0,
       shadow: shadow !== false,
       enableSnapping: enableSnapping !== false,
-      x: Math.round(instance.x),
-      y: Math.round(instance.y),
+      x: Math.round(instance.x ?? 100),
+      y: Math.round(instance.y ?? 100),
     });
 
     const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
     const fallbackPath = './sticker.widget/menu_helper';
+    const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
     const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
 
+    debugLog(`handleContextMenu: running cmd`);
     run(cmd, (err, output) => {
+      debugLog(`handleContextMenu: callback err=${err} output=${output ? output.trim() : 'NONE'}`);
       if (err || !output) return;
       try {
         const res = JSON.parse(output.trim());
@@ -1114,6 +1131,7 @@ export const render = (state, dispatch) => {
         const isDragging = currentState.isDragging && currentState.draggingInstanceId === instance.id;
 
         const handleMouseDown = (e) => {
+          debugLog(`handleMouseDown: id=${instance.id} button=${e.button} ctrl=${e.ctrlKey}`);
           if (e.button === 2 || (e.button === 0 && e.ctrlKey)) {
             if (e.preventDefault) e.preventDefault();
             if (e.stopPropagation) e.stopPropagation();
@@ -1192,7 +1210,7 @@ export const render = (state, dispatch) => {
           height: `${instCardH}px`,
           boxSizing: 'border-box',
           zIndex: isDragging ? 9999 : getWidgetZIndex('sticker'),
-          pointerEvents: hasSticker ? 'none' : 'auto',
+          pointerEvents: 'auto',
           userSelect: 'none',
           WebkitUserSelect: 'none',
         };
