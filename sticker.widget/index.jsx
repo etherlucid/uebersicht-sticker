@@ -88,6 +88,17 @@ const debugLog = (msg) => {
 let currentDispatch = null;
 let currentWidgetState = null;
 
+const getHelperCmd = (payload) => {
+  const escapedPayload = payload.replace(/'/g, "'\\''");
+  const appHelper = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/StickerManager.app/Contents/MacOS/menu_helper';
+  const appAbs = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/StickerManager.app/Contents/MacOS/menu_helper';
+  const appFallback = './sticker.widget/StickerManager.app/Contents/MacOS/menu_helper';
+  const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
+  const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
+  const fallbackPath = './sticker.widget/menu_helper';
+  return `"${appHelper}" '${escapedPayload}' 2>/dev/null || "${appAbs}" '${escapedPayload}' 2>/dev/null || "${appFallback}" '${escapedPayload}' 2>/dev/null || "${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+};
+
 // Sprite Sheet Animation Engine
 const stickerMetaCache = {};
 const sheetImageCache = {};
@@ -957,11 +968,7 @@ export const render = (state, dispatch) => {
       instanceId: instId,
       currentSticker: currentSticker || null,
     });
-    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const fallbackPath = './sticker.widget/menu_helper';
-    const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+    const cmd = getHelperCmd(payload);
 
     run(cmd, (err, output) => {
       if (err || !output) return;
@@ -998,11 +1005,7 @@ export const render = (state, dispatch) => {
       instanceId: instId,
       currentSticker: currentSticker || null,
     });
-    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const fallbackPath = './sticker.widget/menu_helper';
-    const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+    const cmd = getHelperCmd(payload);
 
     run(cmd, (err, output) => {
       if (err || !output) return;
@@ -1034,11 +1037,7 @@ export const render = (state, dispatch) => {
       mode: 'PLUS_CLICK',
       instanceId,
     });
-    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const fallbackPath = './sticker.widget/menu_helper';
-    const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+    const cmd = getHelperCmd(payload);
 
     debugLog(`handlePlusClick: running cmd`);
     run(cmd, (err, output) => {
@@ -1101,11 +1100,7 @@ export const render = (state, dispatch) => {
       y: Math.round(instance.y ?? 100),
     });
 
-    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const fallbackPath = './sticker.widget/menu_helper';
-    const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const escapedPayload = payload.replace(/'/g, "'\\''");
-    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+    const cmd = getHelperCmd(payload);
 
     debugLog(`handleContextMenu: running cmd`);
     run(cmd, (err, output) => {

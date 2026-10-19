@@ -1685,8 +1685,12 @@ app.setActivationPolicy(.accessory)
 
 let delegate = MenuDelegate()
 let helperPath = CommandLine.arguments[0]
-let widgetDir = URL(fileURLWithPath: helperPath).deletingLastPathComponent().path
-let widgetFolder = URL(fileURLWithPath: helperPath).deletingLastPathComponent().lastPathComponent
+var widgetDirURL = URL(fileURLWithPath: helperPath).deletingLastPathComponent()
+if widgetDirURL.path.contains(".app/Contents/MacOS") {
+    widgetDirURL = widgetDirURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+}
+let widgetDir = widgetDirURL.path
+let widgetFolder = widgetDirURL.lastPathComponent
 let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
 
 let mode = state.mode ?? "CONTEXT_MENU"
