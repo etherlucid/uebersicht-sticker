@@ -75,6 +75,7 @@ const SNAP_MARGIN_TOP = 14;
 const SNAP_MARGIN_BOTTOM = 14;
 
 let lastClickTimestamp = 0;
+let lastContextMenuTimestamp = 0;
 let audioTimer = null;
 let isCheckingAudio = false;
 let currentDispatch = null;
@@ -945,8 +946,13 @@ export const render = (state, dispatch) => {
   };
 
   const handleContextMenu = (instance, e) => {
-    e.preventDefault();
-    e.stopPropagation();
+    if (e) {
+      if (e.preventDefault) e.preventDefault();
+      if (e.stopPropagation) e.stopPropagation();
+    }
+    const now = Date.now();
+    if (now - lastContextMenuTimestamp < 350) return;
+    lastContextMenuTimestamp = now;
 
     const payload = JSON.stringify({
       mode: 'CONTEXT_MENU',
@@ -1108,6 +1114,12 @@ export const render = (state, dispatch) => {
         const isDragging = currentState.isDragging && currentState.draggingInstanceId === instance.id;
 
         const handleMouseDown = (e) => {
+          if (e.button === 2 || (e.button === 0 && e.ctrlKey)) {
+            if (e.preventDefault) e.preventDefault();
+            if (e.stopPropagation) e.stopPropagation();
+            handleContextMenu(instance, e);
+            return;
+          }
           if (e.button !== 0) return; // Only primary mouse button
 
           const now = Date.now();
@@ -1226,7 +1238,8 @@ export const render = (state, dispatch) => {
                 className="sticker-blank-square"
                 style={blankSquareStyle}
                 onMouseDown={handleMouseDown}
-                title="Click to select WebP Sticker (or drag to position)"
+                onContextMenu={(e) => handleContextMenu(instance, e)}
+                title="Click to select WebP Sticker (or drag to position, right-click for options)"
               >
                 <svg
                   className="sticker-plus-icon"
@@ -1254,6 +1267,7 @@ export const render = (state, dispatch) => {
                 id={`sticker-interactive-${instance.id}`}
                 style={stickerStyle}
                 onMouseDown={handleMouseDown}
+                onContextMenu={(e) => handleContextMenu(instance, e)}
                 title="Sticker (Drag to move, Double-click to flip, Right-click for options)"
               >
                 <canvas

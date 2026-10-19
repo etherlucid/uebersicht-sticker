@@ -632,6 +632,26 @@ func openStickerManager(widgetDir: String, instanceId: String, currentSticker: S
     return controller.runModal()
 }
 
+@discardableResult
+func popUpMenuAtMouse(menu: NSMenu) -> Bool {
+    let mouseLoc = NSEvent.mouseLocation
+    let win = NSWindow(
+        contentRect: NSRect(x: mouseLoc.x, y: mouseLoc.y, width: 1, height: 1),
+        styleMask: .borderless,
+        backing: .buffered,
+        defer: false
+    )
+    win.isOpaque = false
+    win.backgroundColor = .clear
+    win.level = .popUpMenu
+    win.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+
+    let result = menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: win.contentView)
+    win.orderOut(nil)
+    return result
+}
+
 // MARK: - Main Execution
 
 var state = MenuState()
@@ -706,8 +726,7 @@ if mode == "PLUS_CLICK" {
     finderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
     menu.addItem(finderItem)
 
-    let mouseLoc = NSEvent.mouseLocation
-    menu.popUp(positioning: nil, at: mouseLoc, in: nil)
+    popUpMenuAtMouse(menu: menu)
 
     if let action = delegate.outputAction {
         if action.contains("OPEN_MANAGER") {
@@ -914,8 +933,7 @@ removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"instanceId\":\"\
 menu.addItem(removeItem)
 
 // Pop up native menu above all windows at cursor location
-let mouseLoc = NSEvent.mouseLocation
-menu.popUp(positioning: nil, at: mouseLoc, in: nil)
+popUpMenuAtMouse(menu: menu)
 
 if let action = delegate.outputAction {
     if action.contains("OPEN_MANAGER") {
