@@ -992,6 +992,34 @@ export const render = (state, dispatch) => {
     });
   };
 
+  const openStickerStudioHelper = (instId, currentSticker) => {
+    const payload = JSON.stringify({
+      mode: 'STUDIO',
+      instanceId: instId,
+      currentSticker: currentSticker || null,
+    });
+    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
+    const fallbackPath = './sticker.widget/menu_helper';
+    const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
+    const escapedPayload = payload.replace(/'/g, "'\\''");
+    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+
+    run(cmd, (err, output) => {
+      if (err || !output) return;
+      try {
+        const res = JSON.parse(output.trim());
+        if (!res || !res.action) return;
+        if (res.action === 'SET_STICKER' && res.sticker) {
+          dispatch({
+            type: 'SET_STICKER',
+            instanceId: res.instanceId || instId,
+            sticker: res.sticker,
+          });
+        }
+      } catch (e) {}
+    });
+  };
+
   const handlePlusClick = (instanceId, e) => {
     debugLog(`handlePlusClick: instanceId=${instanceId}`);
     if (e && e.stopPropagation) e.stopPropagation();
@@ -1113,6 +1141,8 @@ export const render = (state, dispatch) => {
           });
         } else if (res.action === 'OPEN_MANAGER') {
           openStickerManagerHelper(res.instanceId || instance.id, instance.sticker);
+        } else if (res.action === 'OPEN_STUDIO') {
+          openStickerStudioHelper(res.instanceId || instance.id, instance.sticker);
         } else if (res.action === 'SET_SCALE') {
           dispatch({
             type: 'SET_SCALE',

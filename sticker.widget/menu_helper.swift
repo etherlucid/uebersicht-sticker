@@ -1,8 +1,12 @@
 import AppKit
 import Foundation
+import CoreImage
+import Vision
+import ImageIO
+import UniformTypeIdentifiers
 
 struct MenuState: Codable {
-    var mode: String?              // "PLUS_CLICK" or "CONTEXT_MENU" or "PICK_ONLY" or "MANAGER"
+    var mode: String?              // "PLUS_CLICK" or "CONTEXT_MENU" or "PICK_ONLY" or "MANAGER" or "STUDIO"
     var instanceId: String?
     var currentSticker: String?    // relative path e.g. "sticker.widget/stickers/cat.webp" or nil
     var scale: Double?
@@ -209,6 +213,837 @@ func reloadWidget(widgetId: String) {
     }
 }
 
+// MARK: - Background Cutout Studio
+
+enum CutoutMode: Int {
+    case smartAI = 0
+    case colorKey = 1
+    case original = 2
+}
+
+class CheckerboardView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let squareSize: CGFloat = 12
+        let cols = Int(ceil(bounds.width / squareSize))
+        let rows = Int(ceil(bounds.height / squareSize))
+        let c1 = NSColor(white: 0.12, alpha: 1.0)
+        let c2 = NSColor(white: 0.18, alpha: 1.0)
+        for r in 0..<rows {
+            for c in 0..<cols {
+                let rect = NSRect(x: CGFloat(c) * squareSize, y: CGFloat(r) * squareSize, width: squareSize, height: squareSize)
+                if rect.intersects(dirtyRect) {
+                    ((r + c) % 2 == 0 ? c1 : c2).setFill()
+                    rect.fill()
+                }
+            }
+        }
+    }
+}
+
+func samplePixelColor(cgImage: CGImage, x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8)? {
+    var pixel = [UInt8](repeating: 0, count: 4)
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let clampedX = max(0, min(cgImage.width - 1, x))
+    let clampedY = max(0, min(cgImage.height - 1, y))
+    guard let ctx = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.draw(cgImage, in: CGRect(x: -clampedX, y: -clampedY, width: cgImage.width, height: cgImage.height))
+    return (pixel[0], pixel[1], pixel[2])
+}
+
+func autoDetectCorners(cgImage: CGImage) -> (r: UInt8, g: UInt8, b: UInt8) {
+    let w = cgImage.width
+    let h = cgImage.height
+    guard w > 2 && h > 2 else { return (255, 255, 255) }
+    let corners = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
+    var rSum = 0, gSum = 0, bSum = 0
+    var valid = 0
+    for (cx, cy) in corners {
+        if let p = samplePixelColor(cgImage: cgImage, x: cx, y: cy) {
+            rSum += Int(p.r); gSum += Int(p.g); bSum += Int(p.b)
+            valid += 1
+        }
+    }
+    if valid == 0 { return (255, 255, 255) }
+    return (UInt8(rSum / valid), UInt8(gSum / valid), UInt8(bSum / valid))
+}
+
+func removeBackgroundColor(
+    from cgImage: CGImage,
+    targetR: UInt8,
+    targetG: UInt8,
+    targetB: UInt8,
+    tolerance: Float,
+    smoothness: Float
+) -> CGImage? {
+    let w = cgImage.width
+    let h = cgImage.height
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bytesPerPixel = 4
+    let bytesPerRow = w * bytesPerPixel
+    var rawData = [UInt8](repeating: 0, count: w * h * bytesPerPixel)
+    guard let ctx = CGContext(data: &rawData, width: w, height: h, bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+    let maxDist: Float = 441.67295593
+    let tolDist = max(0.001, tolerance * maxDist)
+    let smoothDist = max(0.001, smoothness * maxDist)
+    let tR = Float(targetR), tG = Float(targetG), tB = Float(targetB)
+    for idx in stride(from: 0, to: w * h * 4, by: 4) {
+        let a = rawData[idx + 3]
+        if a == 0 { continue }
+        let dr = Float(rawData[idx]) - tR
+        let dg = Float(rawData[idx + 1]) - tG
+        let db = Float(rawData[idx + 2]) - tB
+        let dist = sqrt(dr*dr + dg*dg + db*db)
+        if dist < tolDist {
+            rawData[idx] = 0; rawData[idx+1] = 0; rawData[idx+2] = 0; rawData[idx+3] = 0
+        } else if dist < tolDist + smoothDist {
+            let factor = (dist - tolDist) / smoothDist
+            rawData[idx] = UInt8(Float(rawData[idx]) * factor)
+            rawData[idx+1] = UInt8(Float(rawData[idx+1]) * factor)
+            rawData[idx+2] = UInt8(Float(rawData[idx+2]) * factor)
+            rawData[idx+3] = UInt8(Float(a) * factor)
+        }
+    }
+    return ctx.makeImage()
+}
+
+func removeBackgroundSmartAI(from cgImage: CGImage) -> CGImage? {
+    guard #available(macOS 14.0, *) else { return nil }
+    let req = VNGenerateForegroundInstanceMaskRequest()
+    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+    try? handler.perform([req])
+    guard let result = req.results?.first,
+          let maskBuffer = try? result.generateScaledMaskForImage(forInstances: result.allInstances, from: handler) else {
+        return nil
+    }
+    let ciInput = CIImage(cgImage: cgImage)
+    let ciMask = CIImage(cvPixelBuffer: maskBuffer)
+    let blend = CIFilter(name: "CIBlendWithMask")!
+    blend.setValue(ciInput, forKey: kCIInputImageKey)
+    blend.setValue(CIImage.empty(), forKey: kCIInputBackgroundImageKey)
+    blend.setValue(ciMask, forKey: kCIInputMaskImageKey)
+    guard let out = blend.outputImage else { return nil }
+    let ctx = CIContext(options: nil)
+    return ctx.createCGImage(out, from: ciInput.extent)
+}
+
+func saveStaticPNG(cgImage: CGImage, destURL: URL) -> Bool {
+    guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.png.identifier as CFString, 1, nil) else { return false }
+    CGImageDestinationAddImage(dest, cgImage, nil)
+    return CGImageDestinationFinalize(dest)
+}
+
+func saveAnimatedGIF(frames: [CGImage], delays: [Double], destURL: URL) -> Bool {
+    guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.gif.identifier as CFString, frames.count, nil) else { return false }
+    let gifProps = [
+        kCGImagePropertyGIFDictionary as String: [
+            kCGImagePropertyGIFLoopCount as String: 0
+        ]
+    ]
+    CGImageDestinationSetProperties(dest, gifProps as CFDictionary)
+    for (i, frame) in frames.enumerated() {
+        let delay = (i < delays.count) ? max(0.02, delays[i]) : 0.07
+        let frameProps = [
+            kCGImagePropertyGIFDictionary as String: [
+                kCGImagePropertyGIFUnclampedDelayTime as String: delay
+            ]
+        ]
+        CGImageDestinationAddImage(dest, frame, frameProps as CFDictionary)
+    }
+    return CGImageDestinationFinalize(dest)
+}
+
+func resolveStickerPath(_ rel: String?, widgetDir: String) -> String? {
+    guard let rel = rel, !rel.isEmpty else { return nil }
+    let filename = URL(fileURLWithPath: rel).lastPathComponent
+    let fullWidgetPath = (widgetDir as NSString).appendingPathComponent("stickers/\(filename)")
+    if FileManager.default.fileExists(atPath: fullWidgetPath) {
+        return fullWidgetPath
+    }
+    let repoPath = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/\(filename)"
+    if FileManager.default.fileExists(atPath: repoPath) {
+        return repoPath
+    }
+    if FileManager.default.fileExists(atPath: rel) {
+        return rel
+    }
+    return nil
+}
+
+class InteractivePreviewView: CheckerboardView {
+    var onSampleColor: ((UInt8, UInt8, UInt8) -> Void)?
+    var currentCGImage: CGImage?
+    let imageView = NSImageView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        layer?.masksToBounds = true
+        layer?.borderColor = CGColor(gray: 1.0, alpha: 0.12)
+        layer?.borderWidth = 1
+
+        imageView.frame = bounds
+        imageView.autoresizingMask = [.width, .height]
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(imageView)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let cg = currentCGImage else { return }
+        let loc = convert(event.locationInWindow, from: nil)
+        let viewW = bounds.width
+        let viewH = bounds.height
+        let imgW = CGFloat(cg.width)
+        let imgH = CGFloat(cg.height)
+        guard imgW > 0 && imgH > 0 else { return }
+
+        let scale = min(viewW / imgW, viewH / imgH)
+        let displayW = imgW * scale
+        let displayH = imgH * scale
+        let offsetX = (viewW - displayW) / 2.0
+        let offsetY = (viewH - displayH) / 2.0
+
+        let relX = loc.x - offsetX
+        let relY = loc.y - offsetY
+        if relX >= 0 && relX <= displayW && relY >= 0 && relY <= displayH {
+            let px = Int((relX / displayW) * imgW)
+            let py = Int((relY / displayH) * imgH)
+            if let color = samplePixelColor(cgImage: cg, x: px, y: py) {
+                onSampleColor?(color.r, color.g, color.b)
+            }
+        }
+    }
+}
+
+class StickerCutoutStudioController: NSObject, NSWindowDelegate {
+    let sourcePath: String
+    let widgetDir: String
+    let instanceId: String
+
+    var window: NSWindow!
+    var previewView: InteractivePreviewView!
+    var modeSegmented: NSSegmentedControl!
+    var colorContainer: NSView!
+    var aiContainer: NSView!
+    var originalContainer: NSView!
+
+    var swatchView: NSView!
+    var hexLabel: NSTextField!
+    var toleranceSlider: NSSlider!
+    var toleranceLabel: NSTextField!
+    var featherSlider: NSSlider!
+    var featherLabel: NSTextField!
+
+    var playbackBar: NSView?
+    var playBtn: NSButton?
+    var frameSlider: NSSlider?
+    var frameLabel: NSTextField?
+
+    var saveBtn: NSButton!
+    var infoLabel: NSTextField!
+
+    var frames: [CGImage] = []
+    var frameDelays: [Double] = []
+    var isAnimated: Bool = false
+    var currentFrameIndex: Int = 0
+    var isPlaying: Bool = false
+    var playbackTimer: Timer?
+
+    var cutoutMode: CutoutMode = .colorKey
+    var targetColor: (r: UInt8, g: UInt8, b: UInt8) = (255, 255, 255)
+    var tolerance: Float = 0.15
+    var smoothness: Float = 0.05
+
+    var outputAction: String?
+
+    init(sourcePath: String, widgetDir: String, instanceId: String) {
+        self.sourcePath = sourcePath
+        self.widgetDir = widgetDir
+        self.instanceId = instanceId
+        super.init()
+        loadSource()
+        setupUI()
+        updatePreview()
+    }
+
+    func loadSource() {
+        let url = URL(fileURLWithPath: sourcePath)
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
+        let count = CGImageSourceGetCount(src)
+        for i in 0..<count {
+            if let cg = CGImageSourceCreateImageAtIndex(src, i, nil) {
+                frames.append(cg)
+                var delay = 0.07
+                if let props = CGImageSourceCopyPropertiesAtIndex(src, i, nil) as? [String: Any],
+                   let gifDict = props[kCGImagePropertyGIFDictionary as String] as? [String: Any] {
+                    if let unclamped = gifDict[kCGImagePropertyGIFUnclampedDelayTime as String] as? Double, unclamped > 0.01 {
+                        delay = unclamped
+                    } else if let clamped = gifDict[kCGImagePropertyGIFDelayTime as String] as? Double, clamped > 0.01 {
+                        delay = clamped
+                    }
+                }
+                frameDelays.append(delay)
+            }
+        }
+        isAnimated = (frames.count > 1)
+        if let first = frames.first {
+            targetColor = autoDetectCorners(cgImage: first)
+        }
+    }
+
+    func setupUI() {
+        let w: CGFloat = 820
+        let h: CGFloat = 580
+
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.minSize = NSSize(width: 720, height: 500)
+        window.title = "Background Cutout Studio"
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = NSColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+
+        let root = NSView(frame: window.contentView!.bounds)
+        root.autoresizingMask = [.width, .height]
+        window.contentView = root
+
+        // Top Header (Height 48)
+        let headerH: CGFloat = 48
+        let headerView = NSView(frame: NSRect(x: 0, y: h - headerH, width: w, height: headerH))
+        headerView.autoresizingMask = [.width, .minYMargin]
+        headerView.wantsLayer = true
+        headerView.layer?.backgroundColor = CGColor(srgbRed: 0.13, green: 0.13, blue: 0.15, alpha: 1.0)
+
+        let titleLabel = NSTextField(frame: NSRect(x: 18, y: 14, width: 220, height: 20))
+        titleLabel.isBezeled = false
+        titleLabel.drawsBackground = false
+        titleLabel.isEditable = false
+        titleLabel.isSelectable = false
+        titleLabel.stringValue = "✂️ Cutout Studio"
+        titleLabel.font = .systemFont(ofSize: 15, weight: .bold)
+        titleLabel.textColor = .white
+        headerView.addSubview(titleLabel)
+
+        let filename = URL(fileURLWithPath: sourcePath).lastPathComponent
+        let firstW = frames.first?.width ?? 0
+        let firstH = frames.first?.height ?? 0
+        let infoStr = "\(filename) • \(firstW) × \(firstH) px" + (isAnimated ? " • Animated (\(frames.count) frames)" : " • Static")
+
+        infoLabel = NSTextField(frame: NSRect(x: 230, y: 15, width: w - 246, height: 18))
+        infoLabel.autoresizingMask = [.width]
+        infoLabel.isBezeled = false
+        infoLabel.drawsBackground = false
+        infoLabel.isEditable = false
+        infoLabel.isSelectable = false
+        infoLabel.stringValue = infoStr
+        infoLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        infoLabel.textColor = NSColor(white: 0.65, alpha: 0.9)
+        headerView.addSubview(infoLabel)
+
+        let headerBorder = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 1))
+        headerBorder.autoresizingMask = [.width]
+        headerBorder.wantsLayer = true
+        headerBorder.layer?.backgroundColor = CGColor(gray: 1.0, alpha: 0.08)
+        headerView.addSubview(headerBorder)
+        root.addSubview(headerView)
+
+        // Right Sidebar (Width 270)
+        let sideW: CGFloat = 270
+        let sideMargin: CGFloat = 16
+        let sideH = h - headerH - sideMargin * 2
+        let sideView = NSView(frame: NSRect(x: w - sideW - sideMargin, y: sideMargin, width: sideW, height: sideH))
+        sideView.autoresizingMask = [.minXMargin, .height]
+        sideView.wantsLayer = true
+        sideView.layer?.cornerRadius = 10
+        sideView.layer?.backgroundColor = CGColor(srgbRed: 0.13, green: 0.13, blue: 0.15, alpha: 1.0)
+        sideView.layer?.borderColor = CGColor(gray: 1.0, alpha: 0.08)
+        sideView.layer?.borderWidth = 1
+        root.addSubview(sideView)
+
+        // Mode Segmented Control
+        let modeLabel = NSTextField(frame: NSRect(x: 16, y: sideH - 34, width: sideW - 32, height: 16))
+        modeLabel.autoresizingMask = [.minYMargin]
+        modeLabel.isBezeled = false
+        modeLabel.drawsBackground = false
+        modeLabel.isEditable = false
+        modeLabel.isSelectable = false
+        modeLabel.stringValue = "CUTOUT MODE"
+        modeLabel.font = .systemFont(ofSize: 10, weight: .bold)
+        modeLabel.textColor = NSColor(white: 0.5, alpha: 0.9)
+        sideView.addSubview(modeLabel)
+
+        modeSegmented = NSSegmentedControl(labels: ["🪄 Smart AI", "🎯 Color Key", "⭕ Original"], trackingMode: .selectOne, target: self, action: #selector(modeChanged))
+        modeSegmented.frame = NSRect(x: 14, y: sideH - 68, width: sideW - 28, height: 26)
+        modeSegmented.autoresizingMask = [.minYMargin]
+        modeSegmented.selectedSegment = CutoutMode.colorKey.rawValue
+        sideView.addSubview(modeSegmented)
+
+        // Color Key Container View
+        let containerH = sideH - 74 - 58
+        colorContainer = NSView(frame: NSRect(x: 0, y: 58, width: sideW, height: containerH))
+        colorContainer.autoresizingMask = [.minYMargin, .height]
+        sideView.addSubview(colorContainer)
+
+        let targetColorTitle = NSTextField(frame: NSRect(x: 16, y: containerH - 26, width: sideW - 32, height: 16))
+        targetColorTitle.isBezeled = false
+        targetColorTitle.drawsBackground = false
+        targetColorTitle.isEditable = false
+        targetColorTitle.isSelectable = false
+        targetColorTitle.stringValue = "KEY BACKGROUND COLOR"
+        targetColorTitle.font = .systemFont(ofSize: 10, weight: .bold)
+        targetColorTitle.textColor = NSColor(white: 0.5, alpha: 0.9)
+        colorContainer.addSubview(targetColorTitle)
+
+        // Swatch & Hex row
+        swatchView = NSView(frame: NSRect(x: 16, y: containerH - 68, width: 36, height: 36))
+        swatchView.wantsLayer = true
+        swatchView.layer?.cornerRadius = 6
+        swatchView.layer?.borderWidth = 1.5
+        swatchView.layer?.borderColor = CGColor(gray: 1.0, alpha: 0.25)
+        colorContainer.addSubview(swatchView)
+
+        hexLabel = NSTextField(frame: NSRect(x: 60, y: containerH - 68, width: 95, height: 36))
+        hexLabel.isBezeled = false
+        hexLabel.drawsBackground = false
+        hexLabel.isEditable = false
+        hexLabel.isSelectable = false
+        hexLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        hexLabel.textColor = .white
+        colorContainer.addSubview(hexLabel)
+
+        let autoCornersBtn = NSButton(frame: NSRect(x: sideW - 106, y: containerH - 64, width: 92, height: 28))
+        autoCornersBtn.bezelStyle = .rounded
+        autoCornersBtn.title = "Corners"
+        autoCornersBtn.font = .systemFont(ofSize: 11, weight: .medium)
+        autoCornersBtn.target = self
+        autoCornersBtn.action = #selector(autoCornersClicked)
+        colorContainer.addSubview(autoCornersBtn)
+
+        let hintLabel = NSTextField(frame: NSRect(x: 16, y: containerH - 100, width: sideW - 32, height: 26))
+        hintLabel.isBezeled = false
+        hintLabel.drawsBackground = false
+        hintLabel.isEditable = false
+        hintLabel.isSelectable = false
+        hintLabel.stringValue = "💡 Click anywhere on the preview to sample that pixel color."
+        hintLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        hintLabel.textColor = NSColor(white: 0.55, alpha: 0.9)
+        colorContainer.addSubview(hintLabel)
+
+        // Tolerance Slider
+        let tolY = containerH - 146
+        toleranceLabel = NSTextField(frame: NSRect(x: 16, y: tolY + 20, width: sideW - 32, height: 16))
+        toleranceLabel.isBezeled = false
+        toleranceLabel.drawsBackground = false
+        toleranceLabel.isEditable = false
+        toleranceLabel.isSelectable = false
+        toleranceLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        toleranceLabel.textColor = .white
+        colorContainer.addSubview(toleranceLabel)
+
+        toleranceSlider = NSSlider(value: Double(tolerance * 100), minValue: 0, maxValue: 100, target: self, action: #selector(toleranceChanged))
+        toleranceSlider.frame = NSRect(x: 14, y: tolY - 4, width: sideW - 28, height: 22)
+        colorContainer.addSubview(toleranceSlider)
+
+        // Smoothness Slider
+        let smoothY = containerH - 208
+        featherLabel = NSTextField(frame: NSRect(x: 16, y: smoothY + 20, width: sideW - 32, height: 16))
+        featherLabel.isBezeled = false
+        featherLabel.drawsBackground = false
+        featherLabel.isEditable = false
+        featherLabel.isSelectable = false
+        featherLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        featherLabel.textColor = .white
+        colorContainer.addSubview(featherLabel)
+
+        featherSlider = NSSlider(value: Double(smoothness * 100), minValue: 0, maxValue: 30, target: self, action: #selector(featherChanged))
+        featherSlider.frame = NSRect(x: 14, y: smoothY - 4, width: sideW - 28, height: 22)
+        colorContainer.addSubview(featherSlider)
+
+        updateColorLabels()
+
+        // Smart AI Container View
+        aiContainer = NSView(frame: NSRect(x: 0, y: 58, width: sideW, height: containerH))
+        aiContainer.autoresizingMask = [.minYMargin, .height]
+        aiContainer.isHidden = true
+        sideView.addSubview(aiContainer)
+
+        let aiCard = NSView(frame: NSRect(x: 14, y: containerH - 140, width: sideW - 28, height: 120))
+        aiCard.wantsLayer = true
+        aiCard.layer?.cornerRadius = 8
+        aiCard.layer?.backgroundColor = CGColor(gray: 0.18, alpha: 0.6)
+        aiContainer.addSubview(aiCard)
+
+        let aiTitle = NSTextField(frame: NSRect(x: 12, y: 88, width: aiCard.bounds.width - 24, height: 20))
+        aiTitle.isBezeled = false
+        aiTitle.drawsBackground = false
+        aiTitle.isEditable = false
+        aiTitle.stringValue = "🧠 Apple Neural Vision"
+        aiTitle.font = .systemFont(ofSize: 12, weight: .bold)
+        aiTitle.textColor = .white
+        aiCard.addSubview(aiTitle)
+
+        let aiDesc = NSTextField(frame: NSRect(x: 12, y: 12, width: aiCard.bounds.width - 24, height: 72))
+        aiDesc.isBezeled = false
+        aiDesc.drawsBackground = false
+        aiDesc.isEditable = false
+        aiDesc.stringValue = "Deep neural network segmentation model automatically detects the foreground subject (people, animals, art, objects) and removes the background."
+        aiDesc.font = .systemFont(ofSize: 10.5)
+        aiDesc.textColor = NSColor(white: 0.7, alpha: 0.9)
+        aiCard.addSubview(aiDesc)
+
+        // Original Container View
+        originalContainer = NSView(frame: NSRect(x: 0, y: 58, width: sideW, height: containerH))
+        originalContainer.autoresizingMask = [.minYMargin, .height]
+        originalContainer.isHidden = true
+        sideView.addSubview(originalContainer)
+
+        let origCard = NSView(frame: NSRect(x: 14, y: containerH - 110, width: sideW - 28, height: 90))
+        origCard.wantsLayer = true
+        origCard.layer?.cornerRadius = 8
+        origCard.layer?.backgroundColor = CGColor(gray: 0.18, alpha: 0.6)
+        originalContainer.addSubview(origCard)
+
+        let origTitle = NSTextField(frame: NSRect(x: 12, y: 58, width: origCard.bounds.width - 24, height: 20))
+        origTitle.isBezeled = false
+        origTitle.drawsBackground = false
+        origTitle.isEditable = false
+        origTitle.stringValue = "⭕ Original Image"
+        origTitle.font = .systemFont(ofSize: 12, weight: .bold)
+        origTitle.textColor = .white
+        origCard.addSubview(origTitle)
+
+        let origDesc = NSTextField(frame: NSRect(x: 12, y: 10, width: origCard.bounds.width - 24, height: 44))
+        origDesc.isBezeled = false
+        origDesc.drawsBackground = false
+        origDesc.isEditable = false
+        origDesc.stringValue = "Preserves the image and background exactly as originally formatted."
+        origDesc.font = .systemFont(ofSize: 10.5)
+        origDesc.textColor = NSColor(white: 0.7, alpha: 0.9)
+        origCard.addSubview(origDesc)
+
+        // Bottom Action Buttons in Sidebar
+        let cancelBtn = NSButton(frame: NSRect(x: 14, y: 14, width: 80, height: 32))
+        cancelBtn.bezelStyle = .rounded
+        cancelBtn.title = "Cancel"
+        cancelBtn.target = self
+        cancelBtn.action = #selector(cancelClicked)
+        sideView.addSubview(cancelBtn)
+
+        saveBtn = NSButton(frame: NSRect(x: 100, y: 14, width: sideW - 114, height: 32))
+        saveBtn.bezelStyle = .rounded
+        saveBtn.title = "Save Sticker"
+        saveBtn.font = .systemFont(ofSize: 12, weight: .semibold)
+        saveBtn.target = self
+        saveBtn.action = #selector(saveClicked)
+        sideView.addSubview(saveBtn)
+
+        // Left Center Preview Area
+        let previewX: CGFloat = sideMargin
+        let previewY: CGFloat = isAnimated ? (sideMargin + 42) : sideMargin
+        let previewW: CGFloat = w - sideW - sideMargin * 3
+        let previewH: CGFloat = isAnimated ? (h - headerH - sideMargin * 2 - 42) : (h - headerH - sideMargin * 2)
+
+        previewView = InteractivePreviewView(frame: NSRect(x: previewX, y: previewY, width: previewW, height: previewH))
+        previewView.autoresizingMask = [.width, .height]
+        previewView.onSampleColor = { [weak self] r, g, b in
+            guard let self = self else { return }
+            self.targetColor = (r, g, b)
+            self.updateColorLabels()
+            self.updatePreview()
+        }
+        root.addSubview(previewView)
+
+        // Playback Bar if animated
+        if isAnimated {
+            let bar = NSView(frame: NSRect(x: previewX, y: sideMargin, width: previewW, height: 34))
+            bar.autoresizingMask = [.width, .maxYMargin]
+            bar.wantsLayer = true
+            bar.layer?.cornerRadius = 8
+            bar.layer?.backgroundColor = CGColor(srgbRed: 0.13, green: 0.13, blue: 0.15, alpha: 1.0)
+            bar.layer?.borderColor = CGColor(gray: 1.0, alpha: 0.08)
+            bar.layer?.borderWidth = 1
+            root.addSubview(bar)
+            self.playbackBar = bar
+
+            let play = NSButton(frame: NSRect(x: 6, y: 3, width: 66, height: 28))
+            play.bezelStyle = .rounded
+            play.title = "▶ Play"
+            play.font = .systemFont(ofSize: 11, weight: .medium)
+            play.target = self
+            play.action = #selector(togglePlayback)
+            bar.addSubview(play)
+            self.playBtn = play
+
+            let slider = NSSlider(value: 0, minValue: 0, maxValue: Double(frames.count - 1), target: self, action: #selector(frameSliderChanged))
+            slider.frame = NSRect(x: 76, y: 5, width: previewW - 180, height: 22)
+            slider.autoresizingMask = [.width]
+            slider.numberOfTickMarks = min(frames.count, 20)
+            slider.allowsTickMarkValuesOnly = false
+            bar.addSubview(slider)
+            self.frameSlider = slider
+
+            let fLabel = NSTextField(frame: NSRect(x: previewW - 98, y: 7, width: 92, height: 18))
+            fLabel.autoresizingMask = [.minXMargin]
+            fLabel.isBezeled = false
+            fLabel.drawsBackground = false
+            fLabel.isEditable = false
+            fLabel.alignment = .right
+            fLabel.stringValue = "1 / \(frames.count)"
+            fLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+            fLabel.textColor = NSColor(white: 0.7, alpha: 0.9)
+            bar.addSubview(fLabel)
+            self.frameLabel = fLabel
+        }
+    }
+
+    func updateColorLabels() {
+        let r = targetColor.r
+        let g = targetColor.g
+        let b = targetColor.b
+        let hex = String(format: "#%02X%02X%02X\nR:%d G:%d B:%d", r, g, b, r, g, b)
+        hexLabel.stringValue = hex
+        swatchView.layer?.backgroundColor = CGColor(srgbRed: CGFloat(r)/255.0, green: CGFloat(g)/255.0, blue: CGFloat(b)/255.0, alpha: 1.0)
+        toleranceLabel.stringValue = "Color Tolerance: \(Int(tolerance * 100))%"
+        featherLabel.stringValue = "Edge Feather: \(Int(smoothness * 100))%"
+    }
+
+    @objc func modeChanged() {
+        cutoutMode = CutoutMode(rawValue: modeSegmented.selectedSegment) ?? .colorKey
+        colorContainer.isHidden = (cutoutMode != .colorKey)
+        aiContainer.isHidden = (cutoutMode != .smartAI)
+        originalContainer.isHidden = (cutoutMode != .original)
+        updatePreview()
+    }
+
+    @objc func autoCornersClicked() {
+        guard !frames.isEmpty else { return }
+        targetColor = autoDetectCorners(cgImage: frames[currentFrameIndex])
+        updateColorLabels()
+        updatePreview()
+    }
+
+    @objc func toleranceChanged() {
+        tolerance = toleranceSlider.floatValue / 100.0
+        toleranceLabel.stringValue = "Color Tolerance: \(Int(tolerance * 100))%"
+        updatePreview()
+    }
+
+    @objc func featherChanged() {
+        smoothness = featherSlider.floatValue / 100.0
+        featherLabel.stringValue = "Edge Feather: \(Int(smoothness * 100))%"
+        updatePreview()
+    }
+
+    @objc func togglePlayback() {
+        isPlaying.toggle()
+        playBtn?.title = isPlaying ? "⏸ Pause" : "▶ Play"
+        if isPlaying {
+            startPlaybackTimer()
+        } else {
+            playbackTimer?.invalidate()
+            playbackTimer = nil
+        }
+    }
+
+    func startPlaybackTimer() {
+        playbackTimer?.invalidate()
+        let dur = (currentFrameIndex < frameDelays.count) ? max(0.02, frameDelays[currentFrameIndex]) : 0.07
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: dur, repeats: false) { [weak self] _ in
+            guard let self = self, self.isPlaying else { return }
+            self.currentFrameIndex = (self.currentFrameIndex + 1) % self.frames.count
+            self.frameSlider?.doubleValue = Double(self.currentFrameIndex)
+            self.frameLabel?.stringValue = "\(self.currentFrameIndex + 1) / \(self.frames.count)"
+            self.updatePreview()
+            self.startPlaybackTimer()
+        }
+    }
+
+    @objc func frameSliderChanged() {
+        guard let slider = frameSlider else { return }
+        currentFrameIndex = min(frames.count - 1, max(0, Int(round(slider.doubleValue))))
+        frameLabel?.stringValue = "\(currentFrameIndex + 1) / \(frames.count)"
+        updatePreview()
+    }
+
+    func updatePreview() {
+        guard !frames.isEmpty, currentFrameIndex < frames.count else { return }
+        let currentCG = frames[currentFrameIndex]
+        var outputCG: CGImage?
+
+        switch cutoutMode {
+        case .original:
+            outputCG = currentCG
+        case .colorKey:
+            outputCG = removeBackgroundColor(
+                from: currentCG,
+                targetR: targetColor.r,
+                targetG: targetColor.g,
+                targetB: targetColor.b,
+                tolerance: tolerance,
+                smoothness: smoothness
+            )
+        case .smartAI:
+            outputCG = removeBackgroundSmartAI(from: currentCG) ?? currentCG
+        }
+
+        if let cg = outputCG {
+            previewView.currentCGImage = cg
+            previewView.imageView.image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+        }
+    }
+
+    @objc func cancelClicked() {
+        close()
+    }
+
+    @objc func saveClicked() {
+        saveBtn.isEnabled = false
+        saveBtn.title = "Processing…"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            let fileManager = FileManager.default
+            let stickersDir = (self.widgetDir as NSString).appendingPathComponent("stickers")
+            try? fileManager.createDirectory(atPath: stickersDir, withIntermediateDirectories: true)
+            let repoStickersDir = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
+
+            let originalFilename = URL(fileURLWithPath: self.sourcePath).lastPathComponent
+            let baseName = (originalFilename as NSString).deletingPathExtension
+            var cleanBase = baseName.replacingOccurrences(of: " ", with: "_")
+            if cleanBase.hasSuffix("_cutout") {
+                cleanBase = String(cleanBase.dropLast(7))
+            }
+            let suffix = (self.cutoutMode == .original) ? "" : "_cutout"
+
+            let destExt = self.isAnimated ? "gif" : "png"
+            let finalName = "\(cleanBase)\(suffix).\(destExt)"
+            let destPath = (stickersDir as NSString).appendingPathComponent(finalName)
+            let repoDestPath = (repoStickersDir as NSString).appendingPathComponent(finalName)
+
+            var success = false
+
+            if self.cutoutMode == .original {
+                try? fileManager.removeItem(atPath: destPath)
+                try? fileManager.copyItem(at: URL(fileURLWithPath: self.sourcePath), to: URL(fileURLWithPath: destPath))
+                if fileManager.fileExists(atPath: repoStickersDir) {
+                    try? fileManager.removeItem(atPath: repoDestPath)
+                    try? fileManager.copyItem(at: URL(fileURLWithPath: self.sourcePath), to: URL(fileURLWithPath: repoDestPath))
+                }
+                success = true
+            } else {
+                var processed: [CGImage] = []
+                for frame in self.frames {
+                    if self.cutoutMode == .smartAI {
+                        if let out = removeBackgroundSmartAI(from: frame) {
+                            processed.append(out)
+                        } else {
+                            processed.append(frame)
+                        }
+                    } else {
+                        if let out = removeBackgroundColor(from: frame, targetR: self.targetColor.r, targetG: self.targetColor.g, targetB: self.targetColor.b, tolerance: self.tolerance, smoothness: self.smoothness) {
+                            processed.append(out)
+                        } else {
+                            processed.append(frame)
+                        }
+                    }
+                }
+
+                if self.isAnimated {
+                    success = saveAnimatedGIF(frames: processed, delays: self.frameDelays, destURL: URL(fileURLWithPath: destPath))
+                    if fileManager.fileExists(atPath: repoStickersDir) {
+                        _ = saveAnimatedGIF(frames: processed, delays: self.frameDelays, destURL: URL(fileURLWithPath: repoDestPath))
+                    }
+                } else if let first = processed.first {
+                    success = saveStaticPNG(cgImage: first, destURL: URL(fileURLWithPath: destPath))
+                    if fileManager.fileExists(atPath: repoStickersDir) {
+                        _ = saveStaticPNG(cgImage: first, destURL: URL(fileURLWithPath: repoDestPath))
+                    }
+                }
+            }
+
+            if success {
+                let scriptPath = (self.widgetDir as NSString).appendingPathComponent("sheet_generator.py")
+                if fileManager.fileExists(atPath: scriptPath) {
+                    let task = Process()
+                    task.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+                    task.arguments = [scriptPath, destPath, stickersDir]
+                    try? task.run()
+                    task.waitUntilExit()
+                }
+                if fileManager.fileExists(atPath: repoStickersDir) {
+                    let repoScript = ((repoStickersDir as NSString).deletingLastPathComponent as NSString).appendingPathComponent("sheet_generator.py")
+                    if fileManager.fileExists(atPath: repoScript) {
+                        let repoTask = Process()
+                        repoTask.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+                        repoTask.arguments = [repoScript, repoDestPath, repoStickersDir]
+                        try? repoTask.run()
+                        repoTask.waitUntilExit()
+                    }
+                }
+
+                let relPath = "sticker.widget/stickers/\(finalName)"
+                self.outputAction = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(self.instanceId)\",\"sticker\":\"\(relPath)\",\"name\":\"\(finalName)\"}"
+            }
+
+            DispatchQueue.main.async {
+                self.close()
+            }
+        }
+    }
+
+    func runModal() -> String? {
+        playbackTimer?.invalidate()
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        setupDockIcon()
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.run()
+        return outputAction
+    }
+
+    func close() {
+        playbackTimer?.invalidate()
+        playbackTimer = nil
+        window.orderOut(nil)
+        NSApp.stop(nil)
+        let dummy = NSEvent.otherEvent(
+            with: .applicationDefined,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: 0,
+            data1: 0,
+            data2: 0
+        )
+        if let dummy = dummy {
+            NSApp.postEvent(dummy, atStart: true)
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        close()
+    }
+}
+
+func openStickerCutoutStudio(sourcePath: String, widgetDir: String, instanceId: String) -> String? {
+    let controller = StickerCutoutStudioController(sourcePath: sourcePath, widgetDir: widgetDir, instanceId: instanceId)
+    return controller.runModal()
+}
+
 // MARK: - Sticker Manager UI Components
 
 class WindowBackgroundView: NSView {
@@ -242,13 +1077,15 @@ class WindowBackgroundView: NSView {
 class StickerCardView: NSView {
     let item: StickerItem
     let onSelect: (StickerItem) -> Void
+    let onCutout: (StickerItem) -> Void
     let onDelete: (StickerItem) -> Void
     var isHovered: Bool = false
     var trackingArea: NSTrackingArea?
 
-    init(item: StickerItem, frame: NSRect, onSelect: @escaping (StickerItem) -> Void, onDelete: @escaping (StickerItem) -> Void) {
+    init(item: StickerItem, frame: NSRect, onSelect: @escaping (StickerItem) -> Void, onCutout: @escaping (StickerItem) -> Void, onDelete: @escaping (StickerItem) -> Void) {
         self.item = item
         self.onSelect = onSelect
+        self.onCutout = onCutout
         self.onDelete = onDelete
         super.init(frame: frame)
         wantsLayer = true
@@ -300,6 +1137,21 @@ class StickerCardView: NSView {
             addSubview(badge)
         }
 
+        let cutoutBtn = NSButton(frame: NSRect(x: bounds.width - 50, y: bounds.height - 26, width: 20, height: 20))
+        cutoutBtn.isBordered = false
+        cutoutBtn.toolTip = "Cutout & Remove Background"
+        if let wandImg = NSImage(systemSymbolName: "wand.and.stars", accessibilityDescription: "Cutout") {
+            cutoutBtn.image = wandImg
+            cutoutBtn.imageScaling = .scaleProportionallyDown
+            cutoutBtn.contentTintColor = NSColor(white: 0.75, alpha: 0.9)
+        } else {
+            cutoutBtn.title = "🪄"
+            cutoutBtn.font = .systemFont(ofSize: 12)
+        }
+        cutoutBtn.target = self
+        cutoutBtn.action = #selector(cutoutClicked)
+        addSubview(cutoutBtn)
+
         let delBtn = NSButton(frame: NSRect(x: bounds.width - 26, y: bounds.height - 26, width: 20, height: 20))
         delBtn.isBordered = false
         if let trashImg = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete") {
@@ -313,6 +1165,10 @@ class StickerCardView: NSView {
         delBtn.target = self
         delBtn.action = #selector(deleteClicked)
         addSubview(delBtn)
+    }
+
+    @objc func cutoutClicked() {
+        onCutout(item)
     }
 
     @objc func deleteClicked() {
@@ -339,7 +1195,7 @@ class StickerCardView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let loc = convert(event.locationInWindow, from: nil)
-        if loc.x > bounds.width - 30 && loc.y > bounds.height - 30 {
+        if loc.x > bounds.width - 54 && loc.y > bounds.height - 30 {
             return
         }
         onSelect(item)
@@ -400,9 +1256,16 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         backgroundView.onDropFiles = { [weak self] urls in
             guard let self = self else { return }
             let allowed: Set<String> = ["webp", "gif", "png", "jpg", "jpeg"]
-            for url in urls {
-                let ext = url.pathExtension.lowercased()
-                if allowed.contains(ext) {
+            let validUrls = urls.filter { allowed.contains($0.pathExtension.lowercased()) }
+            if validUrls.count == 1 {
+                if let result = openStickerCutoutStudio(sourcePath: validUrls[0].path, widgetDir: self.widgetDir, instanceId: self.instanceId) {
+                    self.outputAction = result
+                    self.loadStickers()
+                    self.close()
+                    return
+                }
+            } else {
+                for url in validUrls {
                     _ = importSticker(sourcePath: url.path, widgetDir: self.widgetDir, instanceId: self.instanceId)
                 }
             }
@@ -569,6 +1432,18 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
                 onSelect: { [weak self] selected in
                     self?.selectSticker(selected)
                 },
+                onCutout: { [weak self] toCutout in
+                    guard let self = self else { return }
+                    let stickersDir = (self.widgetDir as NSString).appendingPathComponent("stickers")
+                    let fullPath = (stickersDir as NSString).appendingPathComponent(toCutout.filename)
+                    if let result = openStickerCutoutStudio(sourcePath: fullPath, widgetDir: self.widgetDir, instanceId: self.instanceId) {
+                        self.outputAction = result
+                        self.loadStickers()
+                        self.close()
+                    } else {
+                        self.loadStickers()
+                    }
+                },
                 onDelete: { [weak self] toDelete in
                     self?.confirmDelete(toDelete)
                 }
@@ -600,7 +1475,12 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     }
 
     @objc func addStickerClicked() {
-        if pickAndImport(widgetDir: widgetDir, instanceId: instanceId) != nil {
+        guard let src = chooseImageFile() else { return }
+        if let result = openStickerCutoutStudio(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId) {
+            outputAction = result
+            loadStickers()
+            close()
+        } else {
             loadStickers()
         }
     }
@@ -712,6 +1592,19 @@ if mode == "MANAGER" {
     exit(0)
 }
 
+if mode == "STUDIO" {
+    if let curPath = resolveStickerPath(state.currentSticker, widgetDir: widgetDir) {
+        if let result = openStickerCutoutStudio(sourcePath: curPath, widgetDir: widgetDir, instanceId: instanceId) {
+            print(result)
+        }
+    } else if let src = chooseImageFile() {
+        if let result = openStickerCutoutStudio(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId) {
+            print(result)
+        }
+    }
+    exit(0)
+}
+
 if mode == "PLUS_CLICK" {
     // If no local stickers exist yet, directly open Sticker Manager for visual onboarding
     if localStickers.isEmpty {
@@ -797,6 +1690,11 @@ if !localStickers.isEmpty {
 }
 
 if hasSticker {
+    let cutoutItem = NSMenuItem(title: "✂️ Remove Background…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    cutoutItem.target = delegate
+    cutoutItem.representedObject = "{\"action\":\"OPEN_STUDIO\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(cutoutItem)
+
     let clearFromWidget = NSMenuItem(title: "⭕ Clear from Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
     clearFromWidget.target = delegate
     clearFromWidget.representedObject = "{\"action\":\"CLEAR_FROM_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
@@ -962,6 +1860,12 @@ if let action = delegate.outputAction {
     if action.contains("OPEN_MANAGER") {
         if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
             print(result)
+        }
+    } else if action.contains("OPEN_STUDIO") {
+        if let curPath = resolveStickerPath(state.currentSticker, widgetDir: widgetDir) {
+            if let result = openStickerCutoutStudio(sourcePath: curPath, widgetDir: widgetDir, instanceId: instanceId) {
+                print(result)
+            }
         }
     } else if action.contains("TRIGGER_FINDER_PICKER") {
         if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
