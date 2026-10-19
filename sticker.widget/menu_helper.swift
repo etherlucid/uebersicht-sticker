@@ -1258,18 +1258,19 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
             let allowed: Set<String> = ["webp", "gif", "png", "jpg", "jpeg"]
             let validUrls = urls.filter { allowed.contains($0.pathExtension.lowercased()) }
             if validUrls.count == 1 {
-                if let result = openStickerCutoutStudio(sourcePath: validUrls[0].path, widgetDir: self.widgetDir, instanceId: self.instanceId) {
-                    self.outputAction = result
-                    self.loadStickers()
-                    self.close()
-                    return
-                }
+                _ = openStickerCutoutStudio(sourcePath: validUrls[0].path, widgetDir: self.widgetDir, instanceId: self.instanceId)
+                self.loadStickers()
+                self.window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                return
             } else {
                 for url in validUrls {
                     _ = importSticker(sourcePath: url.path, widgetDir: self.widgetDir, instanceId: self.instanceId)
                 }
             }
             self.loadStickers()
+            self.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
 
         // Top Toolbar Header View
@@ -1436,13 +1437,10 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
                     guard let self = self else { return }
                     let stickersDir = (self.widgetDir as NSString).appendingPathComponent("stickers")
                     let fullPath = (stickersDir as NSString).appendingPathComponent(toCutout.filename)
-                    if let result = openStickerCutoutStudio(sourcePath: fullPath, widgetDir: self.widgetDir, instanceId: self.instanceId) {
-                        self.outputAction = result
-                        self.loadStickers()
-                        self.close()
-                    } else {
-                        self.loadStickers()
-                    }
+                    _ = openStickerCutoutStudio(sourcePath: fullPath, widgetDir: self.widgetDir, instanceId: self.instanceId)
+                    self.loadStickers()
+                    self.window.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
                 },
                 onDelete: { [weak self] toDelete in
                     self?.confirmDelete(toDelete)
@@ -1476,13 +1474,10 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
 
     @objc func addStickerClicked() {
         guard let src = chooseImageFile() else { return }
-        if let result = openStickerCutoutStudio(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId) {
-            outputAction = result
-            loadStickers()
-            close()
-        } else {
-            loadStickers()
-        }
+        _ = openStickerCutoutStudio(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId)
+        loadStickers()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func runModal() -> String? {
