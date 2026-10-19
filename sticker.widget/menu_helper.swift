@@ -1690,11 +1690,6 @@ if !localStickers.isEmpty {
 }
 
 if hasSticker {
-    let cutoutItem = NSMenuItem(title: "✂️ Remove Background…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    cutoutItem.target = delegate
-    cutoutItem.representedObject = "{\"action\":\"OPEN_STUDIO\",\"instanceId\":\"\(instanceId)\"}"
-    menu.addItem(cutoutItem)
-
     let clearFromWidget = NSMenuItem(title: "⭕ Clear from Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
     clearFromWidget.target = delegate
     clearFromWidget.representedObject = "{\"action\":\"CLEAR_FROM_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
