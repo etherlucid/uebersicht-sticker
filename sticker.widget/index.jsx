@@ -340,6 +340,22 @@ const getInitialPosition = (cardW, cardH) => {
   };
 };
 
+const RESET_STICKERS_FLAG = 'sticker_reset_blank_plus_v3';
+try {
+  if (typeof localStorage !== 'undefined') {
+    if (localStorage.getItem(RESET_STICKERS_FLAG) !== 'done') {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith(STORAGE_INSTANCES_KEY) || key === STORAGE_INSTANCES_KEY)) {
+          localStorage.removeItem(key);
+        }
+      }
+      localStorage.setItem('sticker_force_blank_once', 'true');
+      localStorage.setItem(RESET_STICKERS_FLAG, 'done');
+    }
+  }
+} catch (e) {}
+
 const getInitialInstances = () => {
   const screenId = getScreenId();
   try {
@@ -508,6 +524,28 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'RESET_TO_BLANK_PLUS') {
+    Object.keys(animFrameState).forEach(k => delete animFrameState[k]);
+    const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+    const blankInstances = [{
+      id: 'default',
+      sticker: null,
+      x: defaultPos.x,
+      y: defaultPos.y,
+      scale: 1.0,
+      flipped: false,
+      isPaused: false,
+      currentFrame: 0,
+      w: BASE_SIZE,
+      h: BASE_SIZE,
+    }];
+    saveInstances(blankInstances);
+    return {
+      ...previousState,
+      instances: blankInstances,
     };
   }
 
@@ -854,20 +892,32 @@ export const render = (state, dispatch) => {
     audioTimer = null;
   }
 
-  const instances = (currentState && currentState.instances && currentState.instances.length > 0)
+  let instances = (currentState && currentState.instances && currentState.instances.length > 0)
     ? currentState.instances
-    : [{
-        id: 'default',
-        sticker: null,
-        x: 100,
-        y: 100,
-        scale: 1.0,
-        flipped: false,
-        isPaused: false,
-        currentFrame: 0,
-        w: BASE_SIZE,
-        h: BASE_SIZE,
-      }];
+    : getInitialInstances();
+
+  if (typeof localStorage !== 'undefined' && localStorage.getItem('sticker_force_blank_once') === 'true') {
+    localStorage.removeItem('sticker_force_blank_once');
+    const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+    instances = [{
+      id: 'default',
+      sticker: null,
+      x: defaultPos.x,
+      y: defaultPos.y,
+      scale: 1.0,
+      flipped: false,
+      isPaused: false,
+      currentFrame: 0,
+      w: BASE_SIZE,
+      h: BASE_SIZE,
+    }];
+    saveInstances(instances);
+    if (dispatch) {
+      setTimeout(() => {
+        dispatch({ type: 'RESET_TO_BLANK_PLUS' });
+      }, 0);
+    }
+  }
 
   debugLog(`RENDER: instances=${instances.length} stickers=${instances.map(i => i.sticker || 'blank').join(',')}`);
 
