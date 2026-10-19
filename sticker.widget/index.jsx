@@ -101,6 +101,7 @@ const getHelperCmd = (payload) => {
 
 // Sprite Sheet Animation Engine
 const stickerMetaCache = {};
+const metaLoadingMap = {};
 const sheetImageCache = {};
 const animFrameState = {};
 let globalRafId = null;
@@ -111,6 +112,12 @@ const loadStickerMeta = (stickerPath, callback) => {
     if (callback) callback(stickerMetaCache[stickerPath]);
     return;
   }
+  if (metaLoadingMap[stickerPath]) {
+    if (callback) metaLoadingMap[stickerPath].push(callback);
+    return;
+  }
+  metaLoadingMap[stickerPath] = callback ? [callback] : [];
+
   const filename = stickerPath.split('/').pop();
   const scriptPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/sheet_generator.py';
   const stickersDir = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers';
@@ -120,6 +127,8 @@ const loadStickerMeta = (stickerPath, callback) => {
   const cmd = `"/usr/bin/python3" "${scriptPath}" "${stickersDir}/${filename}" "${stickersDir}" 2>/dev/null || "/usr/bin/python3" "${fallbackScript}" "${fallbackStickers}/${filename}" "${fallbackStickers}" 2>/dev/null`;
 
   run(cmd, (err, output) => {
+    const callbacks = metaLoadingMap[stickerPath] || [];
+    delete metaLoadingMap[stickerPath];
     if (err || !output) return;
     try {
       const meta = JSON.parse(output.trim());
@@ -130,7 +139,9 @@ const loadStickerMeta = (stickerPath, callback) => {
           img.src = meta.sheet;
           sheetImageCache[meta.sheet] = img;
         }
-        if (callback) callback(meta);
+        callbacks.forEach((cb) => {
+          try { cb(meta); } catch (e) {}
+        });
       }
     } catch (e) {}
   });
@@ -150,10 +161,14 @@ const drawCanvasFrame = (instanceId, stickerPath, frameIndex) => {
     return;
   }
 
+  const inst = currentWidgetState?.instances?.find((i) => i.id === instanceId);
+  if (inst && inst.sticker && inst.sticker !== stickerPath) {
+    return;
+  }
+
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  const inst = currentWidgetState?.instances?.find((i) => i.id === instanceId);
   const instScale = inst?.scale ?? 1.0;
   let naturalW = inst?.w;
   let naturalH = inst?.h;
@@ -228,12 +243,22 @@ const globalAnimLoop = (now) => {
     }
 
     if (!meta.isAnimated || meta.totalFrames <= 1) {
-      drawCanvasFrame(inst.id, inst.sticker, 0);
+      const instScale = inst.scale ?? 1.0;
+      const shadowKey = `${inst.sticker}_${instScale}_${inst.shadow !== false}`;
+      if (!animFrameState[inst.id] || animFrameState[inst.id].staticKey !== shadowKey) {
+        animFrameState[inst.id] = {
+          currentFrame: 0,
+          lastFrameTimestamp: now,
+          staticKey: shadowKey,
+        };
+        drawCanvasFrame(inst.id, inst.sticker, 0);
+      }
       return;
     }
 
-    if (!animFrameState[inst.id]) {
+    if (!animFrameState[inst.id] || animFrameState[inst.id].stickerPath !== inst.sticker) {
       animFrameState[inst.id] = {
+        stickerPath: inst.sticker,
         currentFrame: inst.currentFrame || 0,
         lastFrameTimestamp: now,
       };
@@ -514,10 +539,8 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'SET_STICKER') {
     const targetId = event.instanceId;
-    if (animFrameState[targetId]) {
-      animFrameState[targetId].currentFrame = 0;
-      animFrameState[targetId].lastFrameTimestamp = performance.now();
-    }
+    delete animFrameState[targetId];
+
     const meta = stickerMetaCache[event.sticker];
     let initialW = null;
     let initialH = null;
@@ -538,13 +561,37 @@ export const updateState = (event, previousState) => {
           sticker: event.sticker,
           isPaused: false,
           currentFrame: 0,
-          w: initialW ?? inst.w ?? BASE_SIZE,
-          h: initialH ?? inst.h ?? BASE_SIZE,
+          w: initialW || null,
+          h: initialH || null,
         };
       }
       return inst;
     });
     saveInstances(updatedInstances);
+
+    if (!meta) {
+      loadStickerMeta(event.sticker, (loadedMeta) => {
+        if (loadedMeta && loadedMeta.width && loadedMeta.height) {
+          const aspect = loadedMeta.width / loadedMeta.height;
+          let fitW = BASE_SIZE;
+          let fitH = BASE_SIZE;
+          if (aspect >= 1) {
+            fitH = Math.round(BASE_SIZE / aspect);
+          } else {
+            fitW = Math.round(BASE_SIZE * aspect);
+          }
+          if (currentDispatch) {
+            currentDispatch({
+              type: 'SET_NATURAL_SIZE',
+              instanceId: targetId,
+              w: fitW,
+              h: fitH,
+            });
+          }
+        }
+      });
+    }
+
     return {
       ...previousState,
       instances: updatedInstances,
@@ -1199,14 +1246,14 @@ export const render = (state, dispatch) => {
   };
 
   if (typeof window !== 'undefined') {
-    setTimeout(() => {
+    requestAnimationFrame(() => {
       instances.forEach((inst) => {
         if (inst.sticker) {
           const cur = animFrameState[inst.id]?.currentFrame ?? inst.currentFrame ?? 0;
           drawCanvasFrame(inst.id, inst.sticker, cur);
         }
       });
-    }, 0);
+    });
   }
 
   return (

@@ -1,0 +1,10 @@
+{
+  "isAnimated": true,
+  "width": 200,
+  "height": 200,
+  "totalFrames": 37,
+  "cols": 7,
+  "rows": 6,
+  "frameDuration": 20,
+  "sheet": "sticker.widget/stickers/9985-dance-blob_sheet.webp"
+}

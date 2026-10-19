@@ -1347,6 +1347,7 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     let widgetDir: String
     let instanceId: String
     let currentSticker: String?
+    var autoCreateForInstance: String?
 
     var window: NSWindow!
     var backgroundView: WindowBackgroundView!
@@ -1362,10 +1363,11 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     var deletedActiveSticker: Bool = false
     var activeStudio: StickerCutoutStudioController?
 
-    init(widgetDir: String, instanceId: String, currentSticker: String?) {
+    init(widgetDir: String, instanceId: String, currentSticker: String?, autoCreateForInstance: String? = nil) {
         self.widgetDir = widgetDir
         self.instanceId = instanceId
         self.currentSticker = currentSticker
+        self.autoCreateForInstance = autoCreateForInstance
         super.init()
         setupUI()
         loadStickers()
@@ -1374,14 +1376,32 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     func openCutoutStudio(sourcePath: String) {
         let studio = StickerCutoutStudioController(sourcePath: sourcePath, widgetDir: widgetDir, instanceId: instanceId)
         studio.isStandalone = false
-        studio.onComplete = { [weak self] resultAction in
-            if let resultAction = resultAction {
-                self?.outputAction = resultAction
-            }
+        studio.onComplete = { [weak self] _ in
             self?.loadStickers()
             self?.window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             self?.activeStudio = nil
+        }
+        self.activeStudio = studio
+        studio.showWindow()
+    }
+
+    func openCutoutStudioForQuickCreate(sourcePath: String, targetInstanceId: String) {
+        let studio = StickerCutoutStudioController(sourcePath: sourcePath, widgetDir: widgetDir, instanceId: targetInstanceId)
+        studio.isStandalone = false
+        studio.onComplete = { [weak self] resultAction in
+            guard let self = self else { return }
+            if let resultAction = resultAction {
+                let pendingPath = (self.widgetDir as NSString).appendingPathComponent(".pending_action")
+                try? resultAction.write(toFile: pendingPath, atomically: true, encoding: .utf8)
+                let widgetFolder = URL(fileURLWithPath: self.widgetDir).lastPathComponent
+                let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
+                reloadWidget(widgetId: widgetId)
+            }
+            self.loadStickers()
+            self.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            self.activeStudio = nil
         }
         self.activeStudio = studio
         studio.showWindow()
@@ -1601,13 +1621,8 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     }
 
     func selectSticker(_ item: StickerItem) {
-        outputAction = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(item.relPath)\",\"name\":\"\(item.filename)\"}"
-        let pendingPath = (widgetDir as NSString).appendingPathComponent(".pending_action")
-        try? outputAction?.write(toFile: pendingPath, atomically: true, encoding: .utf8)
-        let widgetFolder = URL(fileURLWithPath: widgetDir).lastPathComponent
-        let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
-        reloadWidget(widgetId: widgetId)
-        close()
+        // Stickers cannot be swapped from Sticker Manager.
+        // Existing stickers can only be changed via Quick Switch in the context menu.
     }
 
     func confirmDelete(_ item: StickerItem) {
@@ -1646,6 +1661,15 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        if let targetInstanceId = autoCreateForInstance {
+            self.autoCreateForInstance = nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                guard let src = chooseImageFile() else { return }
+                self.openCutoutStudioForQuickCreate(sourcePath: src, targetInstanceId: targetInstanceId)
+            }
+        }
     }
 
     func runModal() -> String? {
@@ -1700,8 +1724,8 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     }
 }
 
-func openStickerManager(widgetDir: String, instanceId: String, currentSticker: String?) -> String? {
-    let controller = StickerManagerController(widgetDir: widgetDir, instanceId: instanceId, currentSticker: currentSticker)
+func openStickerManager(widgetDir: String, instanceId: String, currentSticker: String?, autoCreateForInstance: String? = nil) -> String? {
+    let controller = StickerManagerController(widgetDir: widgetDir, instanceId: instanceId, currentSticker: currentSticker, autoCreateForInstance: autoCreateForInstance)
     return controller.runModal()
 }
 
@@ -1856,22 +1880,28 @@ managerMenuItem.target = delegate
 managerMenuItem.representedObject = "{\"action\":\"OPEN_MANAGER\",\"instanceId\":\"\(instanceId)\"}"
 menu.addItem(managerMenuItem)
 
-if !localStickers.isEmpty {
-    let quickSwitchParent = NSMenuItem(title: "⚡ Quick Switch", action: nil, keyEquivalent: "")
-    let quickSwitchMenu = NSMenu(title: "Quick Switch")
-    quickSwitchMenu.autoenablesItems = false
-    for sticker in localStickers {
-        let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-        item.target = delegate
-        item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
-        if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
-            item.state = .on
-        }
-        quickSwitchMenu.addItem(item)
+let quickSwitchParent = NSMenuItem(title: "⚡ Quick Switch", action: nil, keyEquivalent: "")
+let quickSwitchMenu = NSMenu(title: "Quick Switch")
+quickSwitchMenu.autoenablesItems = false
+for sticker in localStickers {
+    let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    item.target = delegate
+    item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
+    if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
+        item.state = .on
     }
-    quickSwitchParent.submenu = quickSwitchMenu
-    menu.addItem(quickSwitchParent)
+    quickSwitchMenu.addItem(item)
 }
+if !localStickers.isEmpty {
+    quickSwitchMenu.addItem(NSMenuItem.separator())
+}
+let createNewItem = NSMenuItem(title: "+ Create New…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+createNewItem.target = delegate
+createNewItem.representedObject = "{\"action\":\"QUICK_CREATE_NEW\",\"instanceId\":\"\(instanceId)\"}"
+quickSwitchMenu.addItem(createNewItem)
+
+quickSwitchParent.submenu = quickSwitchMenu
+menu.addItem(quickSwitchParent)
 
 if hasSticker {
     let clearFromWidget = NSMenuItem(title: "⭕ Clear from Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
@@ -2038,6 +2068,10 @@ popUpMenuAtMouse(menu: menu)
 if let action = delegate.outputAction {
     if action.contains("OPEN_MANAGER") {
         if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
+            print(result)
+        }
+    } else if action.contains("QUICK_CREATE_NEW") {
+        if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker, autoCreateForInstance: instanceId) {
             print(result)
         }
     } else if action.contains("OPEN_STUDIO") {
