@@ -5,6 +5,7 @@ export const command = '';
 
 const BLANK_SQUARE_SIZE = 100;
 const BASE_SIZE = 180;
+const SHADOW_PAD = 24;
 
 const STORAGE_INSTANCES_KEY = 'sticker_widget_instances';
 const STORAGE_OPACITY_KEY = 'sticker_widget_opacity';
@@ -133,35 +134,59 @@ const drawCanvasFrame = (instanceId, stickerPath, frameIndex) => {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
-  const w = meta.width;
-  const h = meta.height;
-
-  if (canvas.width !== w) canvas.width = w;
-  if (canvas.height !== h) canvas.height = h;
-
-  if (!meta.isAnimated || meta.totalFrames <= 1) {
-    ctx.clearRect(0, 0, w, h);
-    ctx.drawImage(sheet, 0, 0, w, h);
-    return;
+  const inst = currentWidgetState?.instances?.find((i) => i.id === instanceId);
+  const instScale = inst?.scale ?? 1.0;
+  let naturalW = inst?.w;
+  let naturalH = inst?.h;
+  if (!naturalW || !naturalH) {
+    const aspect = meta.width / meta.height;
+    if (aspect >= 1) {
+      naturalW = BASE_SIZE;
+      naturalH = Math.round(BASE_SIZE / aspect);
+    } else {
+      naturalH = BASE_SIZE;
+      naturalW = Math.round(BASE_SIZE * aspect);
+    }
   }
+  const cardW = Math.round(naturalW * instScale);
+  const cardH = Math.round(naturalH * instScale);
 
-  const validIndex = Math.max(0, Math.min(meta.totalFrames - 1, frameIndex || 0));
+  const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+  const targetW = Math.round((cardW + SHADOW_PAD * 2) * dpr);
+  const targetH = Math.round((cardH + SHADOW_PAD * 2) * dpr);
+
+  if (targetW <= 0 || targetH <= 0) return;
+
+  if (canvas.width !== targetW) canvas.width = targetW;
+  if (canvas.height !== targetH) canvas.height = targetH;
+
+  const isAnimated = Boolean(meta.isAnimated && meta.totalFrames > 1);
+  const validIndex = isAnimated ? Math.max(0, Math.min(meta.totalFrames - 1, frameIndex || 0)) : 0;
   const cols = meta.cols || 1;
-  const col = validIndex % cols;
-  const row = Math.floor(validIndex / cols);
+  const col = isAnimated ? (validIndex % cols) : 0;
+  const row = isAnimated ? Math.floor(validIndex / cols) : 0;
 
-  ctx.clearRect(0, 0, w, h);
-  ctx.drawImage(
-    sheet,
-    col * w,
-    row * h,
-    w,
-    h,
-    0,
-    0,
-    w,
-    h
-  );
+  const destX = Math.round(SHADOW_PAD * dpr);
+  const destY = Math.round(SHADOW_PAD * dpr);
+  const destW = Math.round(cardW * dpr);
+  const destH = Math.round(cardH * dpr);
+
+  const isDragging = Boolean(currentWidgetState?.isDragging && currentWidgetState?.draggingInstanceId === instanceId);
+  const showShadow = currentWidgetState?.shadow !== false && !isDragging;
+
+  ctx.clearRect(0, 0, targetW, targetH);
+
+  if (showShadow) {
+    ctx.save();
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+    ctx.shadowBlur = Math.round(12 * dpr);
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = Math.round(4 * dpr);
+    ctx.drawImage(sheet, col * meta.width, row * meta.height, meta.width, meta.height, destX, destY, destW, destH);
+    ctx.restore();
+  } else {
+    ctx.drawImage(sheet, col * meta.width, row * meta.height, meta.width, meta.height, destX, destY, destW, destH);
+  }
 };
 
 const globalAnimLoop = (now) => {
@@ -787,8 +812,6 @@ export const render = (state, dispatch) => {
         h: BASE_SIZE,
       }];
 
-  const SHADOW_PAD = 24;
-
   const handlePlusClick = (instanceId, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
     const payload = JSON.stringify({
@@ -1030,11 +1053,10 @@ export const render = (state, dispatch) => {
 
         const containerStyle = {
           position: 'absolute',
-          top: `${y - (hasSticker ? SHADOW_PAD : 0)}px`,
-          left: `${x - (hasSticker ? SHADOW_PAD : 0)}px`,
-          width: `${instCardW + (hasSticker ? SHADOW_PAD * 2 : 0)}px`,
-          height: `${instCardH + (hasSticker ? SHADOW_PAD * 2 : 0)}px`,
-          padding: hasSticker ? `${SHADOW_PAD}px` : 0,
+          top: `${y}px`,
+          left: `${x}px`,
+          width: `${instCardW}px`,
+          height: `${instCardH}px`,
           boxSizing: 'border-box',
           zIndex: isDragging ? 9999 : getWidgetZIndex('sticker'),
           pointerEvents: hasSticker ? 'none' : 'auto',
@@ -1060,14 +1082,14 @@ export const render = (state, dispatch) => {
         };
 
         const stickerStyle = {
+          position: 'relative',
           width: '100%',
           height: '100%',
           pointerEvents: 'auto',
           cursor: isDragging ? 'grabbing' : 'grab',
           transform: instFlipped ? 'scaleX(-1)' : 'none',
           opacity: opacity,
-          filter: (shadow && !isDragging) ? 'drop-shadow(0 4px 12px rgba(0, 0, 0, 0.35))' : 'none',
-          transition: isDragging ? 'none' : 'opacity 0.2s ease, filter 0.15s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+          transition: isDragging ? 'none' : 'opacity 0.2s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
         };
 
         return (
@@ -1115,12 +1137,14 @@ export const render = (state, dispatch) => {
               >
                 <canvas
                   id={`sticker-canvas-${instance.id}`}
-                  width={meta ? meta.width : (instance.w || BASE_SIZE)}
-                  height={meta ? meta.height : (instance.h || BASE_SIZE)}
+                  width={Math.round((instCardW + SHADOW_PAD * 2) * (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1))}
+                  height={Math.round((instCardH + SHADOW_PAD * 2) * (typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1))}
                   style={{
-                    width: '100%',
-                    height: '100%',
-                    objectFit: 'contain',
+                    position: 'absolute',
+                    top: `-${SHADOW_PAD}px`,
+                    left: `-${SHADOW_PAD}px`,
+                    width: `${instCardW + SHADOW_PAD * 2}px`,
+                    height: `${instCardH + SHADOW_PAD * 2}px`,
                     pointerEvents: 'none',
                     userSelect: 'none',
                     WebkitUserSelect: 'none',
