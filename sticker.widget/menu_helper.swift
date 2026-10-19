@@ -36,31 +36,68 @@ class MenuDelegate: NSObject {
     }
 }
 
-func setupDockIcon() {
-    let iconSize = NSSize(width: 512, height: 512)
-    let icon = NSImage(size: iconSize)
-    icon.lockFocus()
-    let bgRect = NSRect(origin: .zero, size: iconSize)
-    let path = NSBezierPath(roundedRect: bgRect.insetBy(dx: 28, dy: 28), xRadius: 105, yRadius: 105)
-
-    let grad = NSGradient(colors: [
-        NSColor(red: 0.22, green: 0.22, blue: 0.26, alpha: 1.0),
-        NSColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
-    ])
-    grad?.draw(in: path, angle: -45)
-
-    NSColor(white: 1.0, alpha: 0.2).setStroke()
-    path.lineWidth = 4
-    path.stroke()
-
-    if let symbol = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil) {
-        let config = NSImage.SymbolConfiguration(pointSize: 220, weight: .semibold)
-        let configured = symbol.withSymbolConfiguration(config) ?? symbol
-        configured.draw(in: NSRect(x: 146, y: 146, width: 220, height: 220))
+func getUebersichtIcon() -> NSImage? {
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "tracesOf.Uebersicht") {
+        let resIconPath = url.appendingPathComponent("Contents/Resources/AppIcon.icns").path
+        if FileManager.default.fileExists(atPath: resIconPath), let img = NSImage(contentsOfFile: resIconPath) {
+            return img
+        }
+        return NSWorkspace.shared.icon(forFile: url.path)
     }
-    icon.unlockFocus()
-    NSApplication.shared.applicationIconImage = icon
+    let candidates = [
+        NSHomeDirectory() + "/Applications/Übersicht.app",
+        NSHomeDirectory() + "/Applications/Uebersicht.app",
+        "/Applications/Übersicht.app",
+        "/Applications/Uebersicht.app"
+    ]
+    for c in candidates {
+        let icns = c + "/Contents/Resources/AppIcon.icns"
+        if FileManager.default.fileExists(atPath: icns), let img = NSImage(contentsOfFile: icns) {
+            return img
+        }
+        if FileManager.default.fileExists(atPath: c) {
+            return NSWorkspace.shared.icon(forFile: c)
+        }
+    }
+    if let app = NSRunningApplication.runningApplications(withBundleIdentifier: "tracesOf.Uebersicht").first,
+       let icon = app.icon {
+        return icon
+    }
+    return nil
 }
+
+func setupDockIcon() {
+    if let icon = getUebersichtIcon() {
+        NSApplication.shared.applicationIconImage = icon
+    }
+}
+
+class StickerAppDelegate: NSObject, NSApplicationDelegate {
+    var getActiveWindow: (() -> NSWindow?)?
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if let win = getActiveWindow?() {
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        return false
+    }
+
+    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        return NSMenu()
+    }
+}
+
+let appDelegate = StickerAppDelegate()
+
 
 func chooseImageFile() -> String? {
     let script = """
@@ -1056,15 +1093,22 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
         isStandalone = true
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
+        appDelegate.getActiveWindow = { [weak self] in self?.window }
         showWindow()
         NSApp.run()
         return outputAction
     }
 
+    private var isClosed = false
     func close() {
+        guard !isClosed else { return }
+        isClosed = true
         playbackTimer?.invalidate()
         playbackTimer = nil
         window.orderOut(nil)
+        if isStandalone {
+            NSApp.setActivationPolicy(.accessory)
+        }
         onComplete?(outputAction)
         if isStandalone {
             NSApp.stop(nil)
@@ -1083,6 +1127,11 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
                 NSApp.postEvent(dummy, atStart: true)
             }
         }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        close()
+        return true
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -1540,6 +1589,9 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     func runModal() -> String? {
         app.setActivationPolicy(.regular)
         setupDockIcon()
+        appDelegate.getActiveWindow = { [weak self] in
+            return self?.activeStudio?.window ?? self?.window
+        }
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -1547,8 +1599,12 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         return outputAction
     }
 
+    private var isClosed = false
     func close() {
+        guard !isClosed else { return }
+        isClosed = true
         window.orderOut(nil)
+        NSApp.setActivationPolicy(.accessory)
         if outputAction == nil && deletedActiveSticker {
             outputAction = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\"}"
         }
@@ -1567,6 +1623,11 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         if let dummy = dummy {
             NSApp.postEvent(dummy, atStart: true)
         }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        close()
+        return true
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -1607,15 +1668,19 @@ func popUpMenuAtMouse(menu: NSMenu) -> Bool {
 
 // MARK: - Main Execution
 
-var state = MenuState()
-if CommandLine.arguments.count > 1 {
-    let jsonStr = CommandLine.arguments[1]
-    if let data = jsonStr.data(using: .utf8) {
-        state = (try? JSONDecoder().decode(MenuState.self, from: data)) ?? MenuState()
-    }
+if CommandLine.arguments.count <= 1 {
+    exit(0)
 }
 
+var state = MenuState()
+let jsonStr = CommandLine.arguments[1]
+if let data = jsonStr.data(using: .utf8) {
+    state = (try? JSONDecoder().decode(MenuState.self, from: data)) ?? MenuState()
+}
+
+ProcessInfo.processInfo.processName = "Übersicht"
 let app = NSApplication.shared
+app.delegate = appDelegate
 app.setActivationPolicy(.accessory)
 
 let delegate = MenuDelegate()
