@@ -506,9 +506,17 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'CLEAR_STICKER') {
     const targetId = event.instanceId;
+    const stickerPath = event.sticker;
+    const filename = stickerPath ? stickerPath.split('/').pop() : null;
     delete animFrameState[targetId];
+    if (stickerPath) {
+      delete stickerMetaCache[stickerPath];
+    }
     const updatedInstances = (previousState.instances || []).map((inst) => {
-      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+      const isTarget = inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'));
+      const isUsingDeleted = stickerPath && (inst.sticker === stickerPath || (filename && inst.sticker && inst.sticker.endsWith(filename)));
+      if (isTarget || isUsingDeleted) {
+        delete animFrameState[inst.id];
         return {
           ...inst,
           sticker: null,
@@ -833,6 +841,19 @@ export const render = (state, dispatch) => {
             instanceId: res.instanceId || instanceId,
             sticker: res.sticker,
           });
+        } else if (res && res.action === 'CLEAR_STICKER') {
+          const st = res.sticker;
+          if (st) {
+            const filename = st.split('/').pop();
+            const baseName = filename.replace(/\.[^/.]+$/, "");
+            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
+            run(deleteCmd);
+          }
+          dispatch({
+            type: 'CLEAR_STICKER',
+            instanceId: res.instanceId || instanceId,
+            sticker: st,
+          });
         }
       } catch (parseErr) {}
     });
@@ -875,9 +896,17 @@ export const render = (state, dispatch) => {
             sticker: res.sticker,
           });
         } else if (res.action === 'CLEAR_STICKER') {
+          const st = res.sticker || instance.sticker;
+          if (st) {
+            const filename = st.split('/').pop();
+            const baseName = filename.replace(/\.[^/.]+$/, "");
+            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
+            run(deleteCmd);
+          }
           dispatch({
             type: 'CLEAR_STICKER',
             instanceId: res.instanceId || instance.id,
+            sticker: st,
           });
         } else if (res.action === 'SET_SCALE') {
           dispatch({

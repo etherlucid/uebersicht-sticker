@@ -120,6 +120,33 @@ func getLocalStickers(widgetDir: String) -> [(filename: String, title: String, r
         }
 }
 
+func removeStickerFiles(stickerRelPath: String, widgetDir: String) {
+    let fileManager = FileManager.default
+    let filename = URL(fileURLWithPath: stickerRelPath).lastPathComponent
+    let baseName = (filename as NSString).deletingPathExtension
+    if baseName.isEmpty { return }
+
+    let stickersDir = (widgetDir as NSString).appendingPathComponent("stickers")
+    let repoStickersDir = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
+    let widgetDirStr = widgetDir
+    let repoDirStr = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget"
+
+    let dirsToCheck = [stickersDir, repoStickersDir, widgetDirStr, repoDirStr]
+
+    for dir in dirsToCheck {
+        guard let files = try? fileManager.contentsOfDirectory(atPath: dir) else { continue }
+        for f in files {
+            if f == filename ||
+               f == "\(baseName).webp" ||
+               f == "\(baseName)_sheet.webp" ||
+               f == "\(baseName)_meta.json" {
+                let fullPath = (dir as NSString).appendingPathComponent(f)
+                try? fileManager.removeItem(atPath: fullPath)
+            }
+        }
+    }
+}
+
 func reloadWidget(widgetId: String) {
     let script = "tell application id \"tracesOf.Uebersicht\" to reload widget id \"\(widgetId)\""
     var err: NSDictionary?
@@ -188,6 +215,20 @@ if mode == "PLUS_CLICK" {
     finderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
     menu.addItem(finderItem)
 
+    if !localStickers.isEmpty {
+        let deleteParent = NSMenuItem(title: "Delete Sticker", action: nil, keyEquivalent: "")
+        let deleteMenu = NSMenu(title: "Delete Sticker")
+        deleteMenu.autoenablesItems = false
+        for sticker in localStickers {
+            let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\"}"
+            deleteMenu.addItem(item)
+        }
+        deleteParent.submenu = deleteMenu
+        menu.addItem(deleteParent)
+    }
+
     let mouseLoc = NSEvent.mouseLocation
     menu.popUp(positioning: nil, at: mouseLoc, in: nil)
 
@@ -197,6 +238,14 @@ if mode == "PLUS_CLICK" {
                 print(result)
             }
         } else {
+            if let data = action.data(using: .utf8),
+               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let act = json["action"] as? String,
+               act == "CLEAR_STICKER" {
+                if let st = json["sticker"] as? String {
+                    removeStickerFiles(stickerRelPath: st, widgetDir: widgetDir)
+                }
+            }
             print(action)
         }
     }
@@ -234,11 +283,25 @@ chooseFinderItem.target = delegate
 chooseFinderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
 stickerMenu.addItem(chooseFinderItem)
 
-if hasSticker {
+if !localStickers.isEmpty {
+    let deleteParent = NSMenuItem(title: "Delete Sticker", action: nil, keyEquivalent: "")
+    let deleteMenu = NSMenu(title: "Delete Sticker")
+    deleteMenu.autoenablesItems = false
+    for sticker in localStickers {
+        let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\"}"
+        deleteMenu.addItem(item)
+    }
+    deleteParent.submenu = deleteMenu
+    stickerMenu.addItem(deleteParent)
+}
+
+if hasSticker, let curSticker = state.currentSticker {
     stickerMenu.addItem(NSMenuItem.separator())
     let clearItem = NSMenuItem(title: "Remove Sticker", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
     clearItem.target = delegate
-    clearItem.representedObject = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\"}"
+    clearItem.representedObject = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(curSticker)\"}"
     stickerMenu.addItem(clearItem)
 }
 
@@ -405,13 +468,17 @@ if let action = delegate.outputAction {
             print(result)
         }
     } else {
-        print(action)
         if let data = action.data(using: .utf8),
            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
            let act = json["action"] as? String {
-            if act == "RELOAD_WIDGET" {
+            if act == "CLEAR_STICKER" {
+                if let st = json["sticker"] as? String {
+                    removeStickerFiles(stickerRelPath: st, widgetDir: widgetDir)
+                }
+            } else if act == "RELOAD_WIDGET" {
                 reloadWidget(widgetId: widgetId)
             }
         }
+        print(action)
     }
 }
