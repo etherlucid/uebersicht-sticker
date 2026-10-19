@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 struct MenuState: Codable {
-    var mode: String?              // "PLUS_CLICK" or "CONTEXT_MENU" or "PICK_ONLY"
+    var mode: String?              // "PLUS_CLICK" or "CONTEXT_MENU" or "PICK_ONLY" or "MANAGER"
     var instanceId: String?
     var currentSticker: String?    // relative path e.g. "sticker.widget/stickers/cat.webp" or nil
     var scale: Double?
@@ -14,6 +14,14 @@ struct MenuState: Codable {
     var enableSnapping: Bool?
     var x: Int?
     var y: Int?
+}
+
+struct StickerItem {
+    let filename: String
+    let title: String
+    let relPath: String
+    let image: NSImage?
+    let isInUse: Bool
 }
 
 class MenuDelegate: NSObject {
@@ -157,6 +165,434 @@ func reloadWidget(widgetId: String) {
     }
 }
 
+// MARK: - Sticker Manager UI Components
+
+class DragDroppableView: NSVisualEffectView {
+    var onDropFiles: (([URL]) -> Void)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let pboard = sender.draggingPasteboard
+        if let types = pboard.types, types.contains(.fileURL) {
+            return .copy
+        }
+        return []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pboard = sender.draggingPasteboard
+        guard let items = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] else {
+            return false
+        }
+        onDropFiles?(items)
+        return true
+    }
+}
+
+class StickerCardView: NSView {
+    let item: StickerItem
+    let onSelect: (StickerItem) -> Void
+    let onDelete: (StickerItem) -> Void
+    var isHovered: Bool = false
+    var trackingArea: NSTrackingArea?
+
+    init(item: StickerItem, frame: NSRect, onSelect: @escaping (StickerItem) -> Void, onDelete: @escaping (StickerItem) -> Void) {
+        self.item = item
+        self.onSelect = onSelect
+        self.onDelete = onDelete
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 10
+        updateColors()
+        setupUI()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func updateColors() {
+        layer?.backgroundColor = isHovered ? CGColor(gray: 1.0, alpha: 0.15) : CGColor(gray: 1.0, alpha: 0.07)
+        layer?.borderColor = isHovered ? CGColor(gray: 1.0, alpha: 0.32) : CGColor(gray: 1.0, alpha: 0.12)
+        layer?.borderWidth = 1
+    }
+
+    func setupUI() {
+        let imgView = NSImageView(frame: NSRect(x: 10, y: 32, width: bounds.width - 20, height: bounds.height - 42))
+        imgView.imageScaling = .scaleProportionallyUpOrDown
+        imgView.image = item.image
+        imgView.unregisterDraggedTypes()
+        addSubview(imgView)
+
+        let label = NSTextField(frame: NSRect(x: 6, y: 6, width: bounds.width - 12, height: 18))
+        label.isBezeled = false
+        label.drawsBackground = false
+        label.isEditable = false
+        label.isSelectable = false
+        label.stringValue = item.title
+        label.font = .systemFont(ofSize: 10.5, weight: .medium)
+        label.textColor = .white
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        addSubview(label)
+
+        if item.isInUse {
+            let badge = NSTextField(frame: NSRect(x: 6, y: bounds.height - 22, width: 44, height: 15))
+            badge.wantsLayer = true
+            badge.layer?.cornerRadius = 4
+            badge.layer?.backgroundColor = CGColor(srgbRed: 0.15, green: 0.45, blue: 0.95, alpha: 0.9)
+            badge.isBezeled = false
+            badge.drawsBackground = false
+            badge.isEditable = false
+            badge.isSelectable = false
+            badge.stringValue = "ACTIVE"
+            badge.font = .systemFont(ofSize: 7.5, weight: .bold)
+            badge.textColor = .white
+            badge.alignment = .center
+            addSubview(badge)
+        }
+
+        let delBtn = NSButton(frame: NSRect(x: bounds.width - 24, y: bounds.height - 24, width: 18, height: 18))
+        delBtn.isBordered = false
+        if let trashImg = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete") {
+            delBtn.image = trashImg
+            delBtn.imageScaling = .scaleProportionallyDown
+            delBtn.contentTintColor = NSColor(white: 0.65, alpha: 0.8)
+        } else {
+            delBtn.title = "×"
+            delBtn.font = .systemFont(ofSize: 14, weight: .bold)
+        }
+        delBtn.target = self
+        delBtn.action = #selector(deleteClicked)
+        addSubview(delBtn)
+    }
+
+    @objc func deleteClicked() {
+        onDelete(item)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area = trackingArea { removeTrackingArea(area) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInActiveApp], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        self.trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        updateColors()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        updateColors()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        if loc.x > bounds.width - 28 && loc.y > bounds.height - 28 {
+            return
+        }
+        onSelect(item)
+    }
+}
+
+class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegate {
+    let widgetDir: String
+    let instanceId: String
+    let currentSticker: String?
+
+    var panel: NSPanel!
+    var visualEffect: DragDroppableView!
+    var searchField: NSSearchField!
+    var scrollView: NSScrollView!
+    var gridView: NSView!
+    var statusLabel: NSTextField!
+
+    var allItems: [StickerItem] = []
+    var filteredItems: [StickerItem] = []
+    var outputAction: String?
+    var deletedActiveSticker: Bool = false
+
+    init(widgetDir: String, instanceId: String, currentSticker: String?) {
+        self.widgetDir = widgetDir
+        self.instanceId = instanceId
+        self.currentSticker = currentSticker
+        super.init()
+        setupUI()
+        loadStickers()
+    }
+
+    func setupUI() {
+        let w: CGFloat = 580
+        let h: CGFloat = 460
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.minSize = NSSize(width: 440, height: 320)
+        panel.maxSize = NSSize(width: 840, height: 640)
+        panel.level = .floating
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.delegate = self
+
+        visualEffect = DragDroppableView(frame: panel.contentView!.bounds)
+        visualEffect.autoresizingMask = [.width, .height]
+        visualEffect.material = .hudWindow
+        visualEffect.blendingMode = .behindWindow
+        visualEffect.state = .active
+        panel.contentView = visualEffect
+
+        visualEffect.onDropFiles = { [weak self] urls in
+            guard let self = self else { return }
+            for url in urls {
+                let ext = url.pathExtension.lowercased()
+                if ext == "webp" || ext == "gif" {
+                    _ = importWebP(sourcePath: url.path, widgetDir: self.widgetDir, instanceId: self.instanceId)
+                }
+            }
+            self.loadStickers()
+        }
+
+        // Header view
+        let headerView = NSView(frame: NSRect(x: 0, y: h - 54, width: w, height: 54))
+        headerView.autoresizingMask = [.width, .minYMargin]
+
+        let titleLabel = NSTextField(frame: NSRect(x: 20, y: 16, width: 130, height: 22))
+        titleLabel.isBezeled = false
+        titleLabel.drawsBackground = false
+        titleLabel.isEditable = false
+        titleLabel.isSelectable = false
+        titleLabel.stringValue = "Sticker Library"
+        titleLabel.font = .systemFont(ofSize: 15, weight: .bold)
+        titleLabel.textColor = .white
+        headerView.addSubview(titleLabel)
+
+        searchField = NSSearchField(frame: NSRect(x: 160, y: 13, width: 240, height: 26))
+        searchField.placeholderString = "Search stickers…"
+        searchField.delegate = self
+        searchField.target = self
+        searchField.action = #selector(searchChanged)
+        headerView.addSubview(searchField)
+
+        let addBtn = NSButton(frame: NSRect(x: w - 150, y: 13, width: 130, height: 26))
+        addBtn.autoresizingMask = [.minXMargin]
+        addBtn.bezelStyle = .rounded
+        addBtn.title = "+ Add Sticker…"
+        addBtn.font = .systemFont(ofSize: 11.5, weight: .medium)
+        addBtn.target = self
+        addBtn.action = #selector(addStickerClicked)
+        headerView.addSubview(addBtn)
+
+        let headerBorder = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 1))
+        headerBorder.autoresizingMask = [.width]
+        headerBorder.wantsLayer = true
+        headerBorder.layer?.backgroundColor = CGColor(gray: 1.0, alpha: 0.12)
+        headerView.addSubview(headerBorder)
+
+        visualEffect.addSubview(headerView)
+
+        // Scroll view & Grid
+        scrollView = NSScrollView(frame: NSRect(x: 0, y: 36, width: w, height: h - 54 - 36))
+        scrollView.autoresizingMask = [.width, .height]
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+
+        gridView = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 400))
+        scrollView.documentView = gridView
+        visualEffect.addSubview(scrollView)
+
+        // Status bar
+        let footerBorder = NSView(frame: NSRect(x: 0, y: 35, width: w, height: 1))
+        footerBorder.autoresizingMask = [.width, .maxYMargin]
+        footerBorder.wantsLayer = true
+        footerBorder.layer?.backgroundColor = CGColor(gray: 1.0, alpha: 0.10)
+        visualEffect.addSubview(footerBorder)
+
+        statusLabel = NSTextField(frame: NSRect(x: 20, y: 8, width: w - 40, height: 18))
+        statusLabel.autoresizingMask = [.width, .maxYMargin]
+        statusLabel.isBezeled = false
+        statusLabel.drawsBackground = false
+        statusLabel.isEditable = false
+        statusLabel.isSelectable = false
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.textColor = NSColor(white: 0.65, alpha: 0.9)
+        visualEffect.addSubview(statusLabel)
+    }
+
+    func loadStickers() {
+        let locals = getLocalStickers(widgetDir: widgetDir)
+        let stickersDir = (widgetDir as NSString).appendingPathComponent("stickers")
+
+        allItems = locals.map { item in
+            let fullPath = (stickersDir as NSString).appendingPathComponent(item.filename)
+            let img = NSImage(contentsOfFile: fullPath)
+            let inUse = (currentSticker != nil && currentSticker!.hasSuffix(item.filename))
+            return StickerItem(
+                filename: item.filename,
+                title: item.title,
+                relPath: item.relPath,
+                image: img,
+                isInUse: inUse
+            )
+        }
+
+        filterAndLayout()
+    }
+
+    @objc func searchChanged() {
+        filterAndLayout()
+    }
+
+    func filterAndLayout() {
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if query.isEmpty {
+            filteredItems = allItems
+        } else {
+            filteredItems = allItems.filter { $0.title.lowercased().contains(query) }
+        }
+
+        statusLabel.stringValue = "\(allItems.count) stickers in library • Drag & drop WebP files here"
+        layoutGrid()
+    }
+
+    func layoutGrid() {
+        gridView.subviews.forEach { $0.removeFromSuperview() }
+
+        if filteredItems.isEmpty {
+            let msgLabel = NSTextField(frame: NSRect(x: 20, y: scrollView.contentSize.height / 2 - 20, width: scrollView.contentSize.width - 40, height: 40))
+            msgLabel.isBezeled = false
+            msgLabel.drawsBackground = false
+            msgLabel.isEditable = false
+            msgLabel.isSelectable = false
+            msgLabel.alignment = .center
+            msgLabel.textColor = NSColor(white: 0.6, alpha: 0.9)
+            if allItems.isEmpty {
+                msgLabel.stringValue = "No stickers yet.\nClick '+ Add Sticker…' or drag and drop WebP files here."
+            } else {
+                msgLabel.stringValue = "No stickers matching '\(searchField.stringValue)'"
+            }
+            msgLabel.font = .systemFont(ofSize: 13)
+            gridView.frame = NSRect(x: 0, y: 0, width: scrollView.contentSize.width, height: scrollView.contentSize.height)
+            gridView.addSubview(msgLabel)
+            return
+        }
+
+        let cardW: CGFloat = 125
+        let cardH: CGFloat = 135
+        let pad: CGFloat = 16
+        let gap: CGFloat = 14
+
+        let availableW = max(100, scrollView.contentSize.width - pad * 2)
+        let cols = max(1, Int((availableW + gap) / (cardW + gap)))
+        let rows = Int(ceil(Double(filteredItems.count) / Double(cols)))
+        let totalH = max(scrollView.contentSize.height, CGFloat(rows) * (cardH + gap) + pad * 2)
+
+        gridView.frame = NSRect(x: 0, y: 0, width: scrollView.contentSize.width, height: totalH)
+
+        for (index, item) in filteredItems.enumerated() {
+            let r = index / cols
+            let c = index % cols
+            let x = pad + CGFloat(c) * (cardW + gap)
+            let y = totalH - pad - CGFloat(r + 1) * cardH - CGFloat(r) * gap
+
+            let card = StickerCardView(
+                item: item,
+                frame: NSRect(x: x, y: y, width: cardW, height: cardH),
+                onSelect: { [weak self] selected in
+                    self?.selectSticker(selected)
+                },
+                onDelete: { [weak self] toDelete in
+                    self?.confirmDelete(toDelete)
+                }
+            )
+            gridView.addSubview(card)
+        }
+    }
+
+    func selectSticker(_ item: StickerItem) {
+        outputAction = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(item.relPath)\",\"name\":\"\(item.filename)\"}"
+        close()
+    }
+
+    func confirmDelete(_ item: StickerItem) {
+        let alert = NSAlert()
+        alert.messageText = "Delete Sticker?"
+        alert.informativeText = "Are you sure you want to permanently delete \"\(item.title)\" from your library? Any widget displaying it will be cleared."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            removeStickerFiles(stickerRelPath: item.relPath, widgetDir: widgetDir)
+            if item.isInUse {
+                deletedActiveSticker = true
+            }
+            loadStickers()
+        }
+    }
+
+    @objc func addStickerClicked() {
+        if pickAndImport(widgetDir: widgetDir, instanceId: instanceId) != nil {
+            loadStickers()
+        }
+    }
+
+    func runModal() -> String? {
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.run()
+        return outputAction
+    }
+
+    func close() {
+        panel.orderOut(nil)
+        if outputAction == nil && deletedActiveSticker {
+            outputAction = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\"}"
+        }
+        NSApp.stop(nil)
+        let dummy = NSEvent.otherEvent(
+            with: .applicationDefined,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: 0,
+            data1: 0,
+            data2: 0
+        )
+        if let dummy = dummy {
+            NSApp.postEvent(dummy, atStart: true)
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        close()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        layoutGrid()
+    }
+}
+
+func openStickerManager(widgetDir: String, instanceId: String, currentSticker: String?) -> String? {
+    let controller = StickerManagerController(widgetDir: widgetDir, instanceId: instanceId, currentSticker: currentSticker)
+    return controller.runModal()
+}
+
+// MARK: - Main Execution
+
 var state = MenuState()
 if CommandLine.arguments.count > 1 {
     let jsonStr = CommandLine.arguments[1]
@@ -185,18 +621,32 @@ if mode == "PICK_ONLY" {
     exit(0)
 }
 
+if mode == "MANAGER" {
+    if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
+        print(result)
+    }
+    exit(0)
+}
+
 if mode == "PLUS_CLICK" {
-    // If no local stickers exist yet, directly launch Finder picker!
+    // If no local stickers exist yet, directly open Sticker Manager for visual onboarding
     if localStickers.isEmpty {
-        if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
+        if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
             print(result)
         }
         exit(0)
     }
 
-    // Otherwise, show popup menu listing local stickers first, then "Choose from Finder..."
+    // Compact popup menu listing "Sticker Library…", local stickers, and "Choose from Finder…"
     let menu = NSMenu(title: "Select Sticker")
     menu.autoenablesItems = false
+
+    let managerItem = NSMenuItem(title: "🖼️ Sticker Library…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    managerItem.target = delegate
+    managerItem.representedObject = "{\"action\":\"OPEN_MANAGER\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(managerItem)
+
+    menu.addItem(NSMenuItem.separator())
 
     for sticker in localStickers {
         let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
@@ -215,37 +665,19 @@ if mode == "PLUS_CLICK" {
     finderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
     menu.addItem(finderItem)
 
-    if !localStickers.isEmpty {
-        let deleteParent = NSMenuItem(title: "Delete Sticker", action: nil, keyEquivalent: "")
-        let deleteMenu = NSMenu(title: "Delete Sticker")
-        deleteMenu.autoenablesItems = false
-        for sticker in localStickers {
-            let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-            item.target = delegate
-            item.representedObject = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\"}"
-            deleteMenu.addItem(item)
-        }
-        deleteParent.submenu = deleteMenu
-        menu.addItem(deleteParent)
-    }
-
     let mouseLoc = NSEvent.mouseLocation
     menu.popUp(positioning: nil, at: mouseLoc, in: nil)
 
     if let action = delegate.outputAction {
-        if action.contains("TRIGGER_FINDER_PICKER") {
+        if action.contains("OPEN_MANAGER") {
+            if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
+                print(result)
+            }
+        } else if action.contains("TRIGGER_FINDER_PICKER") {
             if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
                 print(result)
             }
         } else {
-            if let data = action.data(using: .utf8),
-               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-               let act = json["action"] as? String,
-               act == "CLEAR_STICKER" {
-                if let st = json["sticker"] as? String {
-                    removeStickerFiles(stickerRelPath: st, widgetDir: widgetDir)
-                }
-            }
             print(action)
         }
     }
@@ -258,58 +690,40 @@ menu.autoenablesItems = false
 
 let hasSticker = state.currentSticker != nil && !(state.currentSticker?.isEmpty ?? true)
 
-// Change Sticker / Choose Sticker Submenu
-let stickerParentTitle = hasSticker ? "Change Sticker" : "Choose Sticker"
-let stickerParent = NSMenuItem(title: stickerParentTitle, action: nil, keyEquivalent: "")
-let stickerMenu = NSMenu(title: stickerParentTitle)
-stickerMenu.autoenablesItems = false
-
-for sticker in localStickers {
-    let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    item.target = delegate
-    item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
-    if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
-        item.state = .on
-    }
-    stickerMenu.addItem(item)
-}
+// 1. Sticker Management Section
+let managerMenuItem = NSMenuItem(title: "🖼️ Sticker Library…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+managerMenuItem.target = delegate
+managerMenuItem.representedObject = "{\"action\":\"OPEN_MANAGER\",\"instanceId\":\"\(instanceId)\"}"
+menu.addItem(managerMenuItem)
 
 if !localStickers.isEmpty {
-    stickerMenu.addItem(NSMenuItem.separator())
-}
-
-let chooseFinderItem = NSMenuItem(title: "Choose from Finder…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-chooseFinderItem.target = delegate
-chooseFinderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
-stickerMenu.addItem(chooseFinderItem)
-
-if !localStickers.isEmpty {
-    let deleteParent = NSMenuItem(title: "Delete Sticker", action: nil, keyEquivalent: "")
-    let deleteMenu = NSMenu(title: "Delete Sticker")
-    deleteMenu.autoenablesItems = false
+    let quickSwitchParent = NSMenuItem(title: "⚡ Quick Switch", action: nil, keyEquivalent: "")
+    let quickSwitchMenu = NSMenu(title: "Quick Switch")
+    quickSwitchMenu.autoenablesItems = false
     for sticker in localStickers {
         let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
         item.target = delegate
-        item.representedObject = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\"}"
-        deleteMenu.addItem(item)
+        item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
+        if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
+            item.state = .on
+        }
+        quickSwitchMenu.addItem(item)
     }
-    deleteParent.submenu = deleteMenu
-    stickerMenu.addItem(deleteParent)
+    quickSwitchParent.submenu = quickSwitchMenu
+    menu.addItem(quickSwitchParent)
 }
 
-if hasSticker, let curSticker = state.currentSticker {
-    stickerMenu.addItem(NSMenuItem.separator())
-    let clearItem = NSMenuItem(title: "Remove Sticker", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    clearItem.target = delegate
-    clearItem.representedObject = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(curSticker)\"}"
-    stickerMenu.addItem(clearItem)
-}
-
-stickerParent.submenu = stickerMenu
-menu.addItem(stickerParent)
-
-// If has sticker, show Size, Direction, Opacity
 if hasSticker {
+    let clearFromWidget = NSMenuItem(title: "⭕ Clear from Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    clearFromWidget.target = delegate
+    clearFromWidget.representedObject = "{\"action\":\"CLEAR_FROM_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(clearFromWidget)
+}
+
+// 2. Sticker Display Controls (if has sticker)
+if hasSticker {
+    menu.addItem(NSMenuItem.separator())
+
     // Size Submenu
     let currentScale = state.scale ?? 1.0
     let sizeParent = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
@@ -463,7 +877,11 @@ let mouseLoc = NSEvent.mouseLocation
 menu.popUp(positioning: nil, at: mouseLoc, in: nil)
 
 if let action = delegate.outputAction {
-    if action.contains("TRIGGER_FINDER_PICKER") {
+    if action.contains("OPEN_MANAGER") {
+        if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
+            print(result)
+        }
+    } else if action.contains("TRIGGER_FINDER_PICKER") {
         if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
             print(result)
         }

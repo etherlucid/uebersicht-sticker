@@ -504,6 +504,29 @@ export const updateState = (event, previousState) => {
     };
   }
 
+  if (event.type === 'CLEAR_FROM_WIDGET') {
+    const targetId = event.instanceId;
+    delete animFrameState[targetId];
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+        return {
+          ...inst,
+          sticker: null,
+          isPaused: false,
+          currentFrame: 0,
+          w: null,
+          h: null,
+        };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
   if (event.type === 'CLEAR_STICKER') {
     const targetId = event.instanceId;
     const stickerPath = event.sticker;
@@ -820,6 +843,46 @@ export const render = (state, dispatch) => {
         h: BASE_SIZE,
       }];
 
+  const openStickerManagerHelper = (instId, currentSticker) => {
+    const payload = JSON.stringify({
+      mode: 'MANAGER',
+      instanceId: instId,
+      currentSticker: currentSticker || null,
+    });
+    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
+    const fallbackPath = './sticker.widget/menu_helper';
+    const escapedPayload = payload.replace(/'/g, "'\\''");
+    const cmd = `"${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+
+    run(cmd, (err, output) => {
+      if (err || !output) return;
+      try {
+        const res = JSON.parse(output.trim());
+        if (!res || !res.action) return;
+        if (res.action === 'SET_STICKER' && res.sticker) {
+          dispatch({
+            type: 'SET_STICKER',
+            instanceId: res.instanceId || instId,
+            sticker: res.sticker,
+          });
+        } else if (res.action === 'CLEAR_STICKER') {
+          const st = res.sticker || currentSticker;
+          if (st) {
+            const filename = st.split('/').pop();
+            const baseName = filename.replace(/\.[^/.]+$/, "");
+            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
+            run(deleteCmd);
+          }
+          dispatch({
+            type: 'CLEAR_STICKER',
+            instanceId: res.instanceId || instId,
+            sticker: st,
+          });
+        }
+      } catch (e) {}
+    });
+  };
+
   const handlePlusClick = (instanceId, e) => {
     if (e && e.stopPropagation) e.stopPropagation();
     const payload = JSON.stringify({
@@ -835,13 +898,16 @@ export const render = (state, dispatch) => {
       if (err || !output) return;
       try {
         const res = JSON.parse(output.trim());
-        if (res && res.action === 'SET_STICKER' && res.sticker) {
+        if (!res || !res.action) return;
+        if (res.action === 'SET_STICKER' && res.sticker) {
           dispatch({
             type: 'SET_STICKER',
             instanceId: res.instanceId || instanceId,
             sticker: res.sticker,
           });
-        } else if (res && res.action === 'CLEAR_STICKER') {
+        } else if (res.action === 'OPEN_MANAGER') {
+          openStickerManagerHelper(res.instanceId || instanceId, null);
+        } else if (res.action === 'CLEAR_STICKER') {
           const st = res.sticker;
           if (st) {
             const filename = st.split('/').pop();
@@ -895,6 +961,11 @@ export const render = (state, dispatch) => {
             instanceId: res.instanceId || instance.id,
             sticker: res.sticker,
           });
+        } else if (res.action === 'CLEAR_FROM_WIDGET') {
+          dispatch({
+            type: 'CLEAR_FROM_WIDGET',
+            instanceId: res.instanceId || instance.id,
+          });
         } else if (res.action === 'CLEAR_STICKER') {
           const st = res.sticker || instance.sticker;
           if (st) {
@@ -908,6 +979,8 @@ export const render = (state, dispatch) => {
             instanceId: res.instanceId || instance.id,
             sticker: st,
           });
+        } else if (res.action === 'OPEN_MANAGER') {
+          openStickerManagerHelper(res.instanceId || instance.id, instance.sticker);
         } else if (res.action === 'SET_SCALE') {
           dispatch({
             type: 'SET_SCALE',
