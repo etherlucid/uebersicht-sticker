@@ -1,7 +1,7 @@
 import { React, run } from 'uebersicht';
 
 export const refreshFrequency = false;
-export const command = '';
+export const command = 'cat "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/.pending_action" 2>/dev/null && rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/.pending_action" 2>/dev/null || true';
 
 const BLANK_SQUARE_SIZE = 100;
 const BASE_SIZE = 180;
@@ -450,6 +450,14 @@ export const initialState = {
 
 export const updateState = (event, previousState) => {
   if (!previousState) return initialState;
+  if (event && event.output) {
+    try {
+      const parsed = JSON.parse(event.output.trim());
+      if (parsed && (parsed.action || parsed.type)) {
+        event = { type: parsed.action || parsed.type, ...parsed };
+      }
+    } catch (e) {}
+  }
 
   if (event.type === 'START_DRAG') {
     return {
@@ -510,6 +518,19 @@ export const updateState = (event, previousState) => {
       animFrameState[targetId].currentFrame = 0;
       animFrameState[targetId].lastFrameTimestamp = performance.now();
     }
+    const meta = stickerMetaCache[event.sticker];
+    let initialW = null;
+    let initialH = null;
+    if (meta && meta.width && meta.height) {
+      const aspect = meta.width / meta.height;
+      if (aspect >= 1) {
+        initialH = Math.round(BASE_SIZE / aspect);
+        initialW = BASE_SIZE;
+      } else {
+        initialW = Math.round(BASE_SIZE * aspect);
+        initialH = BASE_SIZE;
+      }
+    }
     const updatedInstances = (previousState.instances || []).map((inst) => {
       if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
         return {
@@ -517,8 +538,8 @@ export const updateState = (event, previousState) => {
           sticker: event.sticker,
           isPaused: false,
           currentFrame: 0,
-          w: null,
-          h: null,
+          w: initialW ?? inst.w ?? BASE_SIZE,
+          h: initialH ?? inst.h ?? BASE_SIZE,
         };
       }
       return inst;
@@ -1205,12 +1226,14 @@ export const render = (state, dispatch) => {
               } else {
                 fitW = Math.round(BASE_SIZE * aspect);
               }
-              dispatch({
-                type: 'SET_NATURAL_SIZE',
-                instanceId: instance.id,
-                w: fitW,
-                h: fitH,
-              });
+              setTimeout(() => {
+                dispatch({
+                  type: 'SET_NATURAL_SIZE',
+                  instanceId: instance.id,
+                  w: fitW,
+                  h: fitH,
+                });
+              }, 0);
             }
             const cur = animFrameState[instance.id]?.currentFrame ?? instance.currentFrame ?? 0;
             drawCanvasFrame(instance.id, instance.sticker, cur);
@@ -1224,12 +1247,14 @@ export const render = (state, dispatch) => {
           } else {
             fitW = Math.round(BASE_SIZE * aspect);
           }
-          dispatch({
-            type: 'SET_NATURAL_SIZE',
-            instanceId: instance.id,
-            w: fitW,
-            h: fitH,
-          });
+          setTimeout(() => {
+            dispatch({
+              type: 'SET_NATURAL_SIZE',
+              instanceId: instance.id,
+              w: fitW,
+              h: fitH,
+            });
+          }, 0);
         }
 
         const instScale = instance.scale ?? 1.0;

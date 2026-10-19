@@ -74,25 +74,66 @@ func setupDockIcon() {
 
 class StickerAppDelegate: NSObject, NSApplicationDelegate {
     var getActiveWindow: (() -> NSWindow?)?
+    var onNewWindowRequested: (() -> Void)?
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if let win = getActiveWindow?() {
+        if flag, let win = getActiveWindow?() {
+            if win.isMiniaturized {
+                win.deminiaturize(nil)
+            }
             win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            return false
+        } else {
+            if let onNew = onNewWindowRequested {
+                onNew()
+                return false
+            } else if let win = getActiveWindow?() {
+                if win.isMiniaturized {
+                    win.deminiaturize(nil)
+                }
+                win.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                return false
+            }
+            return true
+        }
+    }
+
+    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        if let onNew = onNewWindowRequested {
+            onNew()
+            return true
         }
         return false
     }
 
-    func applicationOpenUntitledFile(_ sender: NSApplication) -> Bool {
-        return false
-    }
-
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
+        if let onNew = onNewWindowRequested {
+            onNew()
+            return true
+        }
         return false
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
-        return NSMenu()
+        let menu = NSMenu(title: "Dock Menu")
+        let item = NSMenuItem(title: "Open Sticker Library", action: #selector(handleDockMenuOpen), keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return menu
+    }
+
+    @objc func handleDockMenuOpen() {
+        if let win = getActiveWindow?(), win.isVisible {
+            if win.isMiniaturized {
+                win.deminiaturize(nil)
+            }
+            win.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else if let onNew = onNewWindowRequested {
+            onNew()
+        }
     }
 }
 
@@ -1561,6 +1602,11 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
 
     func selectSticker(_ item: StickerItem) {
         outputAction = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(item.relPath)\",\"name\":\"\(item.filename)\"}"
+        let pendingPath = (widgetDir as NSString).appendingPathComponent(".pending_action")
+        try? outputAction?.write(toFile: pendingPath, atomically: true, encoding: .utf8)
+        let widgetFolder = URL(fileURLWithPath: widgetDir).lastPathComponent
+        let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
+        reloadWidget(widgetId: widgetId)
         close()
     }
 
@@ -1576,6 +1622,12 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
             removeStickerFiles(stickerRelPath: item.relPath, widgetDir: widgetDir)
             if item.isInUse {
                 deletedActiveSticker = true
+                let clearAction = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\"}"
+                let pendingPath = (widgetDir as NSString).appendingPathComponent(".pending_action")
+                try? clearAction.write(toFile: pendingPath, atomically: true, encoding: .utf8)
+                let widgetFolder = URL(fileURLWithPath: widgetDir).lastPathComponent
+                let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
+                reloadWidget(widgetId: widgetId)
             }
             loadStickers()
         }
@@ -1586,15 +1638,24 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         openCutoutStudio(sourcePath: src)
     }
 
-    func runModal() -> String? {
-        app.setActivationPolicy(.regular)
+    func showWindow() {
+        isClosed = false
         setupDockIcon()
-        appDelegate.getActiveWindow = { [weak self] in
-            return self?.activeStudio?.window ?? self?.window
-        }
+        NSApp.setActivationPolicy(.regular)
+        loadStickers()
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func runModal() -> String? {
+        appDelegate.getActiveWindow = { [weak self] in
+            return self?.activeStudio?.window ?? self?.window
+        }
+        appDelegate.onNewWindowRequested = { [weak self] in
+            self?.showWindow()
+        }
+        showWindow()
         NSApp.run()
         return outputAction
     }
@@ -1668,14 +1729,16 @@ func popUpMenuAtMouse(menu: NSMenu) -> Bool {
 
 // MARK: - Main Execution
 
-if CommandLine.arguments.count <= 1 {
-    exit(0)
-}
-
 var state = MenuState()
-let jsonStr = CommandLine.arguments[1]
-if let data = jsonStr.data(using: .utf8) {
-    state = (try? JSONDecoder().decode(MenuState.self, from: data)) ?? MenuState()
+if CommandLine.arguments.count > 1 {
+    let jsonStr = CommandLine.arguments[1]
+    if let data = jsonStr.data(using: .utf8) {
+        state = (try? JSONDecoder().decode(MenuState.self, from: data)) ?? MenuState()
+    }
+} else {
+    // Opened directly with no CLI arguments (e.g. from the macOS Dock or Finder)
+    state.mode = "MANAGER"
+    state.instanceId = "default"
 }
 
 ProcessInfo.processInfo.processName = "Übersicht"
