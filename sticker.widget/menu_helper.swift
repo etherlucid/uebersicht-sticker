@@ -32,6 +32,32 @@ class MenuDelegate: NSObject {
     }
 }
 
+func setupDockIcon() {
+    let iconSize = NSSize(width: 512, height: 512)
+    let icon = NSImage(size: iconSize)
+    icon.lockFocus()
+    let bgRect = NSRect(origin: .zero, size: iconSize)
+    let path = NSBezierPath(roundedRect: bgRect.insetBy(dx: 28, dy: 28), xRadius: 105, yRadius: 105)
+
+    let grad = NSGradient(colors: [
+        NSColor(red: 0.22, green: 0.22, blue: 0.26, alpha: 1.0),
+        NSColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
+    ])
+    grad?.draw(in: path, angle: -45)
+
+    NSColor(white: 1.0, alpha: 0.2).setStroke()
+    path.lineWidth = 4
+    path.stroke()
+
+    if let symbol = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil) {
+        let config = NSImage.SymbolConfiguration(pointSize: 220, weight: .semibold)
+        let configured = symbol.withSymbolConfiguration(config) ?? symbol
+        configured.draw(in: NSRect(x: 146, y: 146, width: 220, height: 220))
+    }
+    icon.unlockFocus()
+    NSApplication.shared.applicationIconImage = icon
+}
+
 func chooseWebPFile() -> String? {
     let script = """
     tell application "System Events"
@@ -76,7 +102,7 @@ func importWebP(sourcePath: String, widgetDir: String, instanceId: String) -> St
             if fileManager.fileExists(atPath: repoDestPath) {
                 try? fileManager.removeItem(atPath: repoDestPath)
             }
-            try? fileManager.copyItem(at: URL(fileURLWithPath: sourcePath), to: URL(fileURLWithPath: repoDestPath))
+            try fileManager.copyItem(at: URL(fileURLWithPath: sourcePath), to: URL(fileURLWithPath: repoDestPath))
         }
 
         // Automatically generate sprite sheet and meta JSON for instant frame-freezing
@@ -167,7 +193,7 @@ func reloadWidget(widgetId: String) {
 
 // MARK: - Sticker Manager UI Components
 
-class DragDroppableView: NSVisualEffectView {
+class WindowBackgroundView: NSView {
     var onDropFiles: (([URL]) -> Void)?
 
     override init(frame: NSRect) {
@@ -216,47 +242,47 @@ class StickerCardView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     func updateColors() {
-        layer?.backgroundColor = isHovered ? CGColor(gray: 1.0, alpha: 0.15) : CGColor(gray: 1.0, alpha: 0.07)
-        layer?.borderColor = isHovered ? CGColor(gray: 1.0, alpha: 0.32) : CGColor(gray: 1.0, alpha: 0.12)
+        layer?.backgroundColor = isHovered ? CGColor(srgbRed: 0.17, green: 0.17, blue: 0.20, alpha: 1.0) : CGColor(srgbRed: 0.13, green: 0.13, blue: 0.15, alpha: 1.0)
+        layer?.borderColor = isHovered ? CGColor(gray: 1.0, alpha: 0.24) : CGColor(gray: 1.0, alpha: 0.08)
         layer?.borderWidth = 1
     }
 
     func setupUI() {
-        let imgView = NSImageView(frame: NSRect(x: 10, y: 32, width: bounds.width - 20, height: bounds.height - 42))
+        let imgView = NSImageView(frame: NSRect(x: 10, y: 34, width: bounds.width - 20, height: bounds.height - 44))
         imgView.imageScaling = .scaleProportionallyUpOrDown
         imgView.image = item.image
         imgView.unregisterDraggedTypes()
         addSubview(imgView)
 
-        let label = NSTextField(frame: NSRect(x: 6, y: 6, width: bounds.width - 12, height: 18))
+        let label = NSTextField(frame: NSRect(x: 6, y: 8, width: bounds.width - 12, height: 18))
         label.isBezeled = false
         label.drawsBackground = false
         label.isEditable = false
         label.isSelectable = false
         label.stringValue = item.title
-        label.font = .systemFont(ofSize: 10.5, weight: .medium)
+        label.font = .systemFont(ofSize: 11, weight: .medium)
         label.textColor = .white
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         addSubview(label)
 
         if item.isInUse {
-            let badge = NSTextField(frame: NSRect(x: 6, y: bounds.height - 22, width: 44, height: 15))
+            let badge = NSTextField(frame: NSRect(x: 8, y: bounds.height - 24, width: 44, height: 16))
             badge.wantsLayer = true
             badge.layer?.cornerRadius = 4
-            badge.layer?.backgroundColor = CGColor(srgbRed: 0.15, green: 0.45, blue: 0.95, alpha: 0.9)
+            badge.layer?.backgroundColor = CGColor(srgbRed: 0.05, green: 0.48, blue: 0.98, alpha: 0.95)
             badge.isBezeled = false
             badge.drawsBackground = false
             badge.isEditable = false
             badge.isSelectable = false
             badge.stringValue = "ACTIVE"
-            badge.font = .systemFont(ofSize: 7.5, weight: .bold)
+            badge.font = .systemFont(ofSize: 8, weight: .bold)
             badge.textColor = .white
             badge.alignment = .center
             addSubview(badge)
         }
 
-        let delBtn = NSButton(frame: NSRect(x: bounds.width - 24, y: bounds.height - 24, width: 18, height: 18))
+        let delBtn = NSButton(frame: NSRect(x: bounds.width - 26, y: bounds.height - 26, width: 20, height: 20))
         delBtn.isBordered = false
         if let trashImg = NSImage(systemSymbolName: "trash", accessibilityDescription: "Delete") {
             delBtn.image = trashImg
@@ -295,7 +321,7 @@ class StickerCardView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let loc = convert(event.locationInWindow, from: nil)
-        if loc.x > bounds.width - 28 && loc.y > bounds.height - 28 {
+        if loc.x > bounds.width - 30 && loc.y > bounds.height - 30 {
             return
         }
         onSelect(item)
@@ -307,9 +333,10 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     let instanceId: String
     let currentSticker: String?
 
-    var panel: NSPanel!
-    var visualEffect: DragDroppableView!
+    var window: NSWindow!
+    var backgroundView: WindowBackgroundView!
     var searchField: NSSearchField!
+    var countLabel: NSTextField!
     var scrollView: NSScrollView!
     var gridView: NSView!
     var statusLabel: NSTextField!
@@ -329,30 +356,30 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     }
 
     func setupUI() {
-        let w: CGFloat = 580
-        let h: CGFloat = 460
-        panel = NSPanel(
+        let w: CGFloat = 640
+        let h: CGFloat = 500
+
+        window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: w, height: h),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        panel.minSize = NSSize(width: 440, height: 320)
-        panel.maxSize = NSSize(width: 840, height: 640)
-        panel.level = .floating
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = true
-        panel.delegate = self
+        window.minSize = NSSize(width: 460, height: 340)
+        window.maxSize = NSSize(width: 960, height: 720)
+        window.title = "Sticker Library"
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = NSColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
+        window.isReleasedWhenClosed = false
+        window.delegate = self
 
-        visualEffect = DragDroppableView(frame: panel.contentView!.bounds)
-        visualEffect.autoresizingMask = [.width, .height]
-        visualEffect.material = .hudWindow
-        visualEffect.blendingMode = .behindWindow
-        visualEffect.state = .active
-        panel.contentView = visualEffect
+        backgroundView = WindowBackgroundView(frame: window.contentView!.bounds)
+        backgroundView.autoresizingMask = [.width, .height]
+        backgroundView.wantsLayer = true
+        backgroundView.layer?.backgroundColor = CGColor(srgbRed: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
+        window.contentView = backgroundView
 
-        visualEffect.onDropFiles = { [weak self] urls in
+        backgroundView.onDropFiles = { [weak self] urls in
             guard let self = self else { return }
             for url in urls {
                 let ext = url.pathExtension.lowercased()
@@ -363,28 +390,30 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
             self.loadStickers()
         }
 
-        // Header view
-        let headerView = NSView(frame: NSRect(x: 0, y: h - 54, width: w, height: 54))
+        // Top Toolbar Header View
+        let headerH: CGFloat = 48
+        let headerView = NSView(frame: NSRect(x: 0, y: h - headerH, width: w, height: headerH))
         headerView.autoresizingMask = [.width, .minYMargin]
+        headerView.wantsLayer = true
+        headerView.layer?.backgroundColor = CGColor(srgbRed: 0.13, green: 0.13, blue: 0.15, alpha: 1.0)
 
-        let titleLabel = NSTextField(frame: NSRect(x: 20, y: 16, width: 130, height: 22))
-        titleLabel.isBezeled = false
-        titleLabel.drawsBackground = false
-        titleLabel.isEditable = false
-        titleLabel.isSelectable = false
-        titleLabel.stringValue = "Sticker Library"
-        titleLabel.font = .systemFont(ofSize: 15, weight: .bold)
-        titleLabel.textColor = .white
-        headerView.addSubview(titleLabel)
-
-        searchField = NSSearchField(frame: NSRect(x: 160, y: 13, width: 240, height: 26))
+        searchField = NSSearchField(frame: NSRect(x: 16, y: 10, width: 220, height: 28))
         searchField.placeholderString = "Search stickers…"
         searchField.delegate = self
         searchField.target = self
         searchField.action = #selector(searchChanged)
         headerView.addSubview(searchField)
 
-        let addBtn = NSButton(frame: NSRect(x: w - 150, y: 13, width: 130, height: 26))
+        countLabel = NSTextField(frame: NSRect(x: 248, y: 14, width: 200, height: 20))
+        countLabel.isBezeled = false
+        countLabel.drawsBackground = false
+        countLabel.isEditable = false
+        countLabel.isSelectable = false
+        countLabel.textColor = NSColor(white: 0.6, alpha: 0.9)
+        countLabel.font = .systemFont(ofSize: 11)
+        headerView.addSubview(countLabel)
+
+        let addBtn = NSButton(frame: NSRect(x: w - 146, y: 10, width: 130, height: 28))
         addBtn.autoresizingMask = [.minXMargin]
         addBtn.bezelStyle = .rounded
         addBtn.title = "+ Add Sticker…"
@@ -396,37 +425,45 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         let headerBorder = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 1))
         headerBorder.autoresizingMask = [.width]
         headerBorder.wantsLayer = true
-        headerBorder.layer?.backgroundColor = CGColor(gray: 1.0, alpha: 0.12)
+        headerBorder.layer?.backgroundColor = CGColor(gray: 1.0, alpha: 0.08)
         headerView.addSubview(headerBorder)
 
-        visualEffect.addSubview(headerView)
+        backgroundView.addSubview(headerView)
 
         // Scroll view & Grid
-        scrollView = NSScrollView(frame: NSRect(x: 0, y: 36, width: w, height: h - 54 - 36))
+        let footerH: CGFloat = 32
+        scrollView = NSScrollView(frame: NSRect(x: 0, y: footerH, width: w, height: h - headerH - footerH))
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
 
         gridView = NSView(frame: NSRect(x: 0, y: 0, width: w, height: 400))
         scrollView.documentView = gridView
-        visualEffect.addSubview(scrollView)
+        backgroundView.addSubview(scrollView)
 
-        // Status bar
-        let footerBorder = NSView(frame: NSRect(x: 0, y: 35, width: w, height: 1))
-        footerBorder.autoresizingMask = [.width, .maxYMargin]
+        // Status bar footer
+        let footerView = NSView(frame: NSRect(x: 0, y: 0, width: w, height: footerH))
+        footerView.autoresizingMask = [.width, .maxYMargin]
+        footerView.wantsLayer = true
+        footerView.layer?.backgroundColor = CGColor(srgbRed: 0.09, green: 0.09, blue: 0.11, alpha: 1.0)
+
+        let footerBorder = NSView(frame: NSRect(x: 0, y: footerH - 1, width: w, height: 1))
+        footerBorder.autoresizingMask = [.width]
         footerBorder.wantsLayer = true
-        footerBorder.layer?.backgroundColor = CGColor(gray: 1.0, alpha: 0.10)
-        visualEffect.addSubview(footerBorder)
+        footerBorder.layer?.backgroundColor = CGColor(gray: 1.0, alpha: 0.06)
+        footerView.addSubview(footerBorder)
 
-        statusLabel = NSTextField(frame: NSRect(x: 20, y: 8, width: w - 40, height: 18))
-        statusLabel.autoresizingMask = [.width, .maxYMargin]
+        statusLabel = NSTextField(frame: NSRect(x: 16, y: 7, width: w - 32, height: 18))
+        statusLabel.autoresizingMask = [.width]
         statusLabel.isBezeled = false
         statusLabel.drawsBackground = false
         statusLabel.isEditable = false
         statusLabel.isSelectable = false
         statusLabel.font = .systemFont(ofSize: 11)
-        statusLabel.textColor = NSColor(white: 0.65, alpha: 0.9)
-        visualEffect.addSubview(statusLabel)
+        statusLabel.textColor = NSColor(white: 0.55, alpha: 0.9)
+        footerView.addSubview(statusLabel)
+
+        backgroundView.addSubview(footerView)
     }
 
     func loadStickers() {
@@ -457,11 +494,13 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if query.isEmpty {
             filteredItems = allItems
+            countLabel.stringValue = "\(allItems.count) sticker\(allItems.count == 1 ? "" : "s")"
         } else {
             filteredItems = allItems.filter { $0.title.lowercased().contains(query) }
+            countLabel.stringValue = "\(filteredItems.count) of \(allItems.count)"
         }
 
-        statusLabel.stringValue = "\(allItems.count) stickers in library • Drag & drop WebP files here"
+        statusLabel.stringValue = "Drag & drop WebP files anywhere into this window to import"
         layoutGrid()
     }
 
@@ -469,17 +508,17 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         gridView.subviews.forEach { $0.removeFromSuperview() }
 
         if filteredItems.isEmpty {
-            let msgLabel = NSTextField(frame: NSRect(x: 20, y: scrollView.contentSize.height / 2 - 20, width: scrollView.contentSize.width - 40, height: 40))
+            let msgLabel = NSTextField(frame: NSRect(x: 20, y: scrollView.contentSize.height / 2 - 25, width: scrollView.contentSize.width - 40, height: 50))
             msgLabel.isBezeled = false
             msgLabel.drawsBackground = false
             msgLabel.isEditable = false
             msgLabel.isSelectable = false
             msgLabel.alignment = .center
-            msgLabel.textColor = NSColor(white: 0.6, alpha: 0.9)
+            msgLabel.textColor = NSColor(white: 0.55, alpha: 0.9)
             if allItems.isEmpty {
-                msgLabel.stringValue = "No stickers yet.\nClick '+ Add Sticker…' or drag and drop WebP files here."
+                msgLabel.stringValue = "No stickers in library yet.\nClick '+ Add Sticker…' or drag & drop WebP files here."
             } else {
-                msgLabel.stringValue = "No stickers matching '\(searchField.stringValue)'"
+                msgLabel.stringValue = "No stickers matching \"\(searchField.stringValue)\""
             }
             msgLabel.font = .systemFont(ofSize: 13)
             gridView.frame = NSRect(x: 0, y: 0, width: scrollView.contentSize.width, height: scrollView.contentSize.height)
@@ -487,8 +526,8 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
             return
         }
 
-        let cardW: CGFloat = 125
-        let cardH: CGFloat = 135
+        let cardW: CGFloat = 135
+        let cardH: CGFloat = 145
         let pad: CGFloat = 16
         let gap: CGFloat = 14
 
@@ -548,15 +587,17 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     }
 
     func runModal() -> String? {
-        panel.center()
-        panel.makeKeyAndOrderFront(nil)
+        app.setActivationPolicy(.regular)
+        setupDockIcon()
+        window.center()
+        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         NSApp.run()
         return outputAction
     }
 
     func close() {
-        panel.orderOut(nil)
+        window.orderOut(nil)
         if outputAction == nil && deletedActiveSticker {
             outputAction = "{\"action\":\"CLEAR_STICKER\",\"instanceId\":\"\(instanceId)\"}"
         }

@@ -779,9 +779,28 @@ export const updateState = (event, previousState) => {
         instances: updatedInstances,
       };
     } else {
-      const wid = event.widgetId || 'sticker-widget-index-jsx';
-      run(`osascript -e 'tell application id "tracesOf.Uebersicht" to set hidden of widget id "${wid}" to true'`);
-      return previousState;
+      // When no more widgets on this monitor, maintain the blank plus square so the system is always accessible
+      const target = current[0];
+      delete animFrameState[target?.id];
+      const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+      const blankInst = {
+        id: target?.id || 'default',
+        sticker: null,
+        x: target?.x ?? defaultPos.x,
+        y: target?.y ?? defaultPos.y,
+        scale: 1.0,
+        flipped: false,
+        isPaused: false,
+        currentFrame: 0,
+        w: BASE_SIZE,
+        h: BASE_SIZE,
+      };
+      const updatedInstances = [blankInst];
+      saveInstances(updatedInstances);
+      return {
+        ...previousState,
+        instances: updatedInstances,
+      };
     }
   }
 
