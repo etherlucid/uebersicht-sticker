@@ -6,9 +6,10 @@ import ImageIO
 import UniformTypeIdentifiers
 
 struct MenuState: Codable {
-    var mode: String?              // "PLUS_CLICK" or "CONTEXT_MENU" or "PICK_ONLY" or "MANAGER" or "STUDIO"
+    var mode: String?              // "PLUS_CLICK" or "CONTEXT_MENU" or "PICK_ONLY" or "MANAGER" or "STUDIO" or "SYNC_DISPLAYS"
     var instanceId: String?
     var currentSticker: String?    // relative path e.g. "sticker.widget/stickers/cat.webp" or nil
+    var targetName: String?
     var scale: Double?
     var flipped: Bool?
     var isPaused: Bool?
@@ -289,6 +290,92 @@ func reloadWidget(widgetId: String) {
         let refreshScript = "tell application id \"tracesOf.Uebersicht\" to refresh"
         NSAppleScript(source: refreshScript)?.executeAndReturnError(nil)
     }
+}
+
+func syncWidgetsToTargetDisplay(targetPattern: String = "ASUS") -> String {
+    let screens = NSScreen.screens
+    var targetScreen: NSScreen? = nil
+
+    // 1. Search for display name containing targetPattern (e.g. "ASUS")
+    for s in screens {
+        if s.localizedName.localizedCaseInsensitiveContains(targetPattern) {
+            targetScreen = s
+            break
+        }
+    }
+
+    // 2. Check for portrait orientation (height > width, e.g. rotated vertical monitor)
+    if targetScreen == nil {
+        for s in screens {
+            if s.frame.height > s.frame.width {
+                targetScreen = s
+                break
+            }
+        }
+    }
+
+    // 3. Fallback: non-main screen if multiple screens exist
+    if targetScreen == nil && screens.count > 1 {
+        targetScreen = screens.first(where: { $0 != NSScreen.main })
+    }
+
+    guard let foundScreen = targetScreen else {
+        return "{\"status\":\"skipped\",\"reason\":\"Target display '\(targetPattern)' not connected\"}"
+    }
+
+    guard let screenNumber = foundScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+        return "{\"status\":\"error\",\"reason\":\"Unable to obtain NSScreenNumber\"}"
+    }
+
+    let settingsPath = ("~/Library/Application Support/tracesOf.Uebersicht/WidgetSettings.json" as NSString).expandingTildeInPath
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: settingsPath)),
+          var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: [String: Any]] else {
+        return "{\"status\":\"error\",\"reason\":\"Unable to read WidgetSettings.json\"}"
+    }
+
+    let targetWidgets = [
+        "sticker-widget-index-jsx",
+        "cava-widget-index-jsx",
+        "nowplaying-widget-index-jsx",
+        "shell-widget-index-jsx"
+    ]
+
+    var needsUpdate = false
+    for widgetKey in targetWidgets {
+        var currentSetting = json[widgetKey] ?? [
+            "showOnAllScreens": false,
+            "showOnMainScreen": false,
+            "showOnSelectedScreens": true,
+            "hidden": false,
+            "screens": []
+        ]
+
+        let curScreens = (currentSetting["screens"] as? [Int]) ?? []
+        let curSelected = (currentSetting["showOnSelectedScreens"] as? Bool) ?? false
+
+        if !curSelected || curScreens != [Int(screenNumber)] {
+            currentSetting["showOnAllScreens"] = false
+            currentSetting["showOnMainScreen"] = false
+            currentSetting["showOnSelectedScreens"] = true
+            currentSetting["hidden"] = false
+            currentSetting["screens"] = [Int(screenNumber)]
+            json[widgetKey] = currentSetting
+            needsUpdate = true
+        }
+    }
+
+    if needsUpdate {
+        if let newData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+            try? newData.write(to: URL(fileURLWithPath: settingsPath))
+
+            let script = "tell application id \"tracesOf.Uebersicht\" to refresh"
+            NSAppleScript(source: script)?.executeAndReturnError(nil)
+
+            return "{\"status\":\"success\",\"updated\":true,\"screenName\":\"\(foundScreen.localizedName)\",\"screenId\":\(screenNumber)}"
+        }
+    }
+
+    return "{\"status\":\"success\",\"updated\":false,\"screenName\":\"\(foundScreen.localizedName)\",\"screenId\":\(screenNumber)}"
 }
 
 // MARK: - Background Cutout Studio
@@ -1786,6 +1873,12 @@ let localStickers = getLocalStickers(widgetDir: widgetDir)
 
 logHelper("MAIN: mode=\(mode) instanceId=\(instanceId) localStickers=\(localStickers.count)")
 
+if mode == "SYNC_DISPLAYS" || CommandLine.arguments.contains("--sync-displays") {
+    let result = syncWidgetsToTargetDisplay(targetPattern: state.targetName ?? "ASUS")
+    print(result)
+    exit(0)
+}
+
 if mode == "PICK_ONLY" {
     if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
         print(result)
@@ -2044,6 +2137,12 @@ resetItem.target = delegate
 resetItem.representedObject = "{\"action\":\"RESET_POSITION\",\"instanceId\":\"\(instanceId)\"}"
 menu.addItem(resetItem)
 
+// Snap Widgets to External Display
+let snapDisplayItem = NSMenuItem(title: "🖥️ Snap Widgets to External Display", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+snapDisplayItem.target = delegate
+snapDisplayItem.representedObject = "{\"action\":\"SNAP_TO_EXTERNAL_DISPLAY\"}"
+menu.addItem(snapDisplayItem)
+
 // Reload Widget
 let reloadItem = NSMenuItem(title: "Reload Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 reloadItem.target = delegate
@@ -2084,6 +2183,9 @@ if let action = delegate.outputAction {
         if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
             print(result)
         }
+    } else if action.contains("SNAP_TO_EXTERNAL_DISPLAY") {
+        let result = syncWidgetsToTargetDisplay(targetPattern: state.targetName ?? "ASUS")
+        print(result)
     } else {
         if let data = action.data(using: .utf8),
            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],

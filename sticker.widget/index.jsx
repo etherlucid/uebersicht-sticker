@@ -976,6 +976,21 @@ if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_sticker
   });
 }
 
+if (typeof window !== 'undefined' && !window.__uebersicht_display_sync_listener) {
+  window.__uebersicht_display_sync_listener = true;
+  let lastSyncTime = 0;
+  const triggerAutoDisplaySync = () => {
+    const now = Date.now();
+    if (now - lastSyncTime < 4000) return;
+    lastSyncTime = now;
+    const cmd = getHelperCmd(JSON.stringify({ mode: 'SYNC_DISPLAYS' }));
+    run(cmd);
+  };
+
+  window.addEventListener('resize', triggerAutoDisplaySync);
+  setTimeout(triggerAutoDisplaySync, 2000);
+}
+
 export const render = (state, dispatch) => {
   const currentState = state || initialState;
   const {
