@@ -1375,10 +1375,18 @@ class StickerCardView: NSView {
         imgView.unregisterDraggedTypes()
         addSubview(imgView)
 
-        let pill = NSTextField(frame: NSRect(x: (bounds.width - 64) / 2, y: 14, width: 64, height: 20))
+        let pillW: CGFloat = 68
+        let pillH: CGFloat = 22
+        let pillX = (bounds.width - pillW) / 2
+        let pillY: CGFloat = 58
+        let pill = NSTextField(frame: NSRect(x: pillX, y: pillY, width: pillW, height: pillH))
         pill.wantsLayer = true
-        pill.layer?.cornerRadius = 10
+        pill.layer?.cornerRadius = pillH / 2
         pill.layer?.backgroundColor = CGColor(srgbRed: 0.05, green: 0.48, blue: 0.98, alpha: 0.95)
+        pill.layer?.shadowColor = CGColor(gray: 0, alpha: 0.6)
+        pill.layer?.shadowOpacity = 0.5
+        pill.layer?.shadowOffset = CGSize(width: 0, height: -1)
+        pill.layer?.shadowRadius = 3
         pill.isBezeled = false
         pill.drawsBackground = false
         pill.isEditable = false
