@@ -1,0 +1,10 @@
+{
+  "isAnimated": true,
+  "width": 128,
+  "height": 128,
+  "totalFrames": 24,
+  "cols": 5,
+  "rows": 5,
+  "frameDuration": 100,
+  "sheet": "sticker.widget/stickers/27859-cronchycat_sheet.webp"
+}

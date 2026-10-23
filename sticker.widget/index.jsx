@@ -1,7 +1,7 @@
 import { React, run } from 'uebersicht';
 
 export const refreshFrequency = false;
-export const command = 'cat "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/.pending_action" 2>/dev/null && rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/.pending_action" 2>/dev/null || true';
+export const command = 'cat "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/.pending_action" 2>/dev/null || true';
 
 const BLANK_SQUARE_SIZE = 100;
 const BASE_SIZE = 180;
@@ -902,6 +902,104 @@ export const updateState = (event, previousState) => {
     };
   }
 
+  if (event.type === 'ADD_STICKER_INSTANCE') {
+    const curScreenId = getScreenId();
+    const targetScreen = event.targetScreen;
+    const targetRes = event.targetResolution;
+    const targetNum = event.targetScreenNum ? `screen_${event.targetScreenNum}` : null;
+
+    // Check if this screen is the target
+    const isTarget = !targetScreen || 
+                     targetScreen === 'all' || 
+                     curScreenId === targetScreen || 
+                     (targetNum && curScreenId === targetNum) || 
+                     (targetRes && curScreenId === targetRes);
+
+    if (!isTarget) {
+      return previousState;
+    }
+
+    if (event.actionId && previousState.lastActionId === event.actionId) {
+      return previousState;
+    }
+
+    const current = previousState.instances || [];
+    const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+
+    let updatedInstances;
+    let newInstId = 'default';
+    if (current.length === 1 && !current[0].sticker) {
+      // Replace the blank placeholder with the new sticker at top-left
+      newInstId = current[0].id || 'default';
+      updatedInstances = [{
+        ...current[0],
+        sticker: event.sticker,
+        x: defaultPos.x,
+        y: defaultPos.y,
+        scale: 1.0,
+        flipped: false,
+        isPaused: false,
+        currentFrame: 0,
+        w: BASE_SIZE,
+        h: BASE_SIZE,
+        audioSync: false,
+      }];
+    } else {
+      let posX = defaultPos.x;
+      let posY = defaultPos.y;
+      const exactMatch = current.some(i => Math.abs((i.x ?? 0) - posX) < 15 && Math.abs((i.y ?? 0) - posY) < 15);
+      if (exactMatch) {
+        posX += 30;
+        posY += 30;
+      }
+
+      newInstId = `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+      const newInst = {
+        id: newInstId,
+        sticker: event.sticker,
+        x: posX,
+        y: posY,
+        scale: 1.0,
+        flipped: false,
+        isPaused: false,
+        currentFrame: 0,
+        w: BASE_SIZE,
+        h: BASE_SIZE,
+        audioSync: false,
+      };
+      updatedInstances = [...current, newInst];
+    }
+
+    saveInstances(updatedInstances);
+
+    loadStickerMeta(event.sticker, (loadedMeta) => {
+      if (loadedMeta && loadedMeta.width && loadedMeta.height) {
+        const aspect = loadedMeta.width / loadedMeta.height;
+        let fitW = BASE_SIZE;
+        let fitH = BASE_SIZE;
+        if (aspect >= 1) {
+          fitH = Math.round(BASE_SIZE / aspect);
+        } else {
+          fitW = Math.round(BASE_SIZE * aspect);
+        }
+        if (currentDispatch) {
+          currentDispatch({
+            type: 'SET_NATURAL_SIZE',
+            instanceId: newInstId,
+            w: fitW,
+            h: fitH,
+          });
+        }
+      }
+    });
+
+    return {
+      ...previousState,
+      instances: updatedInstances,
+      lastActionId: event.actionId || null,
+    };
+  }
+
   if (event.type === 'DUPLICATE_WIDGET') {
     const current = previousState.instances && previousState.instances.length > 0
       ? previousState.instances
@@ -1076,6 +1174,11 @@ export const render = (state, dispatch) => {
             type: 'CLEAR_STICKER',
             instanceId: res.instanceId || instId,
             sticker: st,
+          });
+        } else if (res.action === 'ADD_STICKER_INSTANCE') {
+          dispatch({
+            type: 'ADD_STICKER_INSTANCE',
+            ...res,
           });
         }
       } catch (e) {}

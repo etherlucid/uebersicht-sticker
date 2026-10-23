@@ -378,6 +378,40 @@ func syncWidgetsToTargetDisplay(targetPattern: String = "ASUS") -> String {
     return "{\"status\":\"success\",\"updated\":false,\"screenName\":\"\(foundScreen.localizedName)\",\"screenId\":\(screenNumber)}"
 }
 
+func ensureScreenEnabledInWidgetSettings(screenNumber: Int, widgetKey: String = "sticker-widget-index-jsx") {
+    let settingsPath = ("~/Library/Application Support/tracesOf.Uebersicht/WidgetSettings.json" as NSString).expandingTildeInPath
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: settingsPath)),
+          var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: [String: Any]] else {
+        return
+    }
+
+    var currentSetting = json[widgetKey] ?? [
+        "showOnAllScreens": false,
+        "showOnMainScreen": false,
+        "showOnSelectedScreens": true,
+        "hidden": false,
+        "screens": []
+    ]
+
+    if (currentSetting["showOnAllScreens"] as? Bool) == true {
+        return
+    }
+
+    var curScreens = (currentSetting["screens"] as? [Int]) ?? []
+    if !curScreens.contains(screenNumber) {
+        curScreens.append(screenNumber)
+        currentSetting["screens"] = curScreens
+        currentSetting["showOnSelectedScreens"] = true
+        currentSetting["showOnAllScreens"] = false
+        currentSetting["hidden"] = false
+        json[widgetKey] = currentSetting
+
+        if let newData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+            try? newData.write(to: URL(fileURLWithPath: settingsPath))
+        }
+    }
+}
+
 // MARK: - Background Cutout Studio
 
 enum CutoutMode: Int {
@@ -1309,6 +1343,7 @@ class StickerCardView: NSView {
     let onDelete: (StickerItem) -> Void
     var isHovered: Bool = false
     var trackingArea: NSTrackingArea?
+    var addPill: NSTextField?
 
     init(item: StickerItem, frame: NSRect, onSelect: @escaping (StickerItem) -> Void, onCutout: @escaping (StickerItem) -> Void, onDelete: @escaping (StickerItem) -> Void) {
         self.item = item
@@ -1326,16 +1361,35 @@ class StickerCardView: NSView {
 
     func updateColors() {
         layer?.backgroundColor = isHovered ? CGColor(srgbRed: 0.17, green: 0.17, blue: 0.20, alpha: 1.0) : CGColor(srgbRed: 0.13, green: 0.13, blue: 0.15, alpha: 1.0)
-        layer?.borderColor = isHovered ? CGColor(gray: 1.0, alpha: 0.24) : CGColor(gray: 1.0, alpha: 0.08)
-        layer?.borderWidth = 1
+        layer?.borderColor = isHovered ? CGColor(gray: 1.0, alpha: 0.28) : CGColor(gray: 1.0, alpha: 0.08)
+        layer?.borderWidth = isHovered ? 1.5 : 1.0
+        addPill?.isHidden = !isHovered
     }
 
     func setupUI() {
+        toolTip = "Click to add \"\(item.title)\" to desktop (top-left)"
+
         let imgView = NSImageView(frame: NSRect(x: 10, y: 34, width: bounds.width - 20, height: bounds.height - 44))
         imgView.imageScaling = .scaleProportionallyUpOrDown
         imgView.image = item.image
         imgView.unregisterDraggedTypes()
         addSubview(imgView)
+
+        let pill = NSTextField(frame: NSRect(x: (bounds.width - 64) / 2, y: 14, width: 64, height: 20))
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 10
+        pill.layer?.backgroundColor = CGColor(srgbRed: 0.05, green: 0.48, blue: 0.98, alpha: 0.95)
+        pill.isBezeled = false
+        pill.drawsBackground = false
+        pill.isEditable = false
+        pill.isSelectable = false
+        pill.stringValue = "+ Add"
+        pill.font = .systemFont(ofSize: 11, weight: .bold)
+        pill.textColor = .white
+        pill.alignment = .center
+        pill.isHidden = true
+        addSubview(pill)
+        self.addPill = pill
 
         let label = NSTextField(frame: NSRect(x: 6, y: 8, width: bounds.width - 12, height: 18))
         label.isBezeled = false
@@ -1401,6 +1455,11 @@ class StickerCardView: NSView {
 
     @objc func deleteClicked() {
         onDelete(item)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
     }
 
     override func updateTrackingAreas() {
@@ -1708,8 +1767,106 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
     }
 
     func selectSticker(_ item: StickerItem) {
-        // Stickers cannot be swapped from Sticker Manager.
-        // Existing stickers can only be changed via Quick Switch in the context menu.
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+
+        struct ScreenChoice {
+            let name: String
+            let screenNumber: Int
+            let screenId: String
+            let resolutionId: String
+            let isMain: Bool
+        }
+
+        var screenChoices: [ScreenChoice] = []
+        for (idx, screen) in screens.enumerated() {
+            let name = screen.localizedName
+            let num = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? Int) ?? (idx + 1)
+            let resW = Int(screen.frame.width)
+            let resH = Int(screen.frame.height)
+            screenChoices.append(ScreenChoice(
+                name: name,
+                screenNumber: num,
+                screenId: "screen_\(num)",
+                resolutionId: "screen_\(resW)x\(resH)",
+                isMain: (screen == NSScreen.main)
+            ))
+        }
+
+        var chosenChoice: ScreenChoice? = nil
+
+        if screenChoices.count == 1 {
+            chosenChoice = screenChoices[0]
+        } else {
+            let alert = NSAlert()
+            alert.messageText = "Select Monitor"
+            alert.informativeText = "Which monitor would you like to place \"\(item.title)\" on?"
+            alert.alertStyle = .informational
+
+            for choice in screenChoices {
+                let suffix = choice.isMain ? " (Main)" : ""
+                let resStr = " (\(choice.resolutionId.replacingOccurrences(of: "screen_", with: "")))"
+                alert.addButton(withTitle: "\(choice.name)\(suffix)\(resStr)")
+            }
+            alert.addButton(withTitle: "Cancel")
+
+            let response = alert.runModal()
+            let rawIdx = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            if rawIdx >= 0 && rawIdx < screenChoices.count {
+                chosenChoice = screenChoices[rawIdx]
+            } else {
+                // User cancelled
+                return
+            }
+        }
+
+        guard let targetChoice = chosenChoice else { return }
+
+        // 1. Ensure target monitor is enabled in WidgetSettings.json so Übersicht renders it there
+        ensureScreenEnabledInWidgetSettings(screenNumber: targetChoice.screenNumber)
+
+        // 2. Prepare action payload for ADD_STICKER_INSTANCE
+        let actionId = UUID().uuidString
+        let actionPayload: [String: Any] = [
+            "action": "ADD_STICKER_INSTANCE",
+            "type": "ADD_STICKER_INSTANCE",
+            "sticker": item.relPath,
+            "name": item.filename,
+            "targetScreen": targetChoice.screenId,
+            "targetScreenNum": targetChoice.screenNumber,
+            "targetResolution": targetChoice.resolutionId,
+            "actionId": actionId
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: actionPayload, options: []),
+           let jsonStr = String(data: data, encoding: .utf8) {
+            
+            outputAction = jsonStr
+
+            // Write to .pending_action for Übersicht reload
+            let pendingPath = (widgetDir as NSString).appendingPathComponent(".pending_action")
+            try? jsonStr.write(toFile: pendingPath, atomically: true, encoding: .utf8)
+
+            // Spawn background cleanup of .pending_action after 2 seconds
+            let cleanupCmd = "(sleep 2 && rm -f '\(pendingPath)') &"
+            let cleanupTask = Process()
+            cleanupTask.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            cleanupTask.arguments = ["-c", cleanupCmd]
+            try? cleanupTask.run()
+
+            // Reload widget in Übersicht so target monitor reads .pending_action and displays the sticker
+            let widgetFolder = URL(fileURLWithPath: widgetDir).lastPathComponent
+            let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
+            reloadWidget(widgetId: widgetId)
+
+            // Refresh to ensure all displays are updated
+            let refreshScript = "tell application id \"tracesOf.Uebersicht\" to refresh"
+            NSAppleScript(source: refreshScript)?.executeAndReturnError(nil)
+
+            // Update status bar in Sticker Manager
+            statusLabel.stringValue = "Placed \"\(item.title)\" at top-left of \(targetChoice.name)"
+            loadStickers()
+        }
     }
 
     func confirmDelete(_ item: StickerItem) {
