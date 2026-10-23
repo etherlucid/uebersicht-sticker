@@ -1,17 +1,17 @@
 #include <CoreAudio/CoreAudio.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 
 /**
  * 1. Fast-path: Check real-time frequency bars from Cava if active.
- * When audio plays, cava produces non-zero FFT bars every ~28ms.
- * When audio stops, bars drop to 0 within ~30ms.
- * Returns: 1 if non-zero audio bars detected, 0 if all bars silent, -1 if unavailable.
+ * When audio plays, cava produces non-zero FFT bars (0-100 scale).
+ * Returns: peak bar value (0-100) if active, or -1 if unavailable/stale.
  */
-static int checkCavaBars(void) {
+static int getCavaPeakLevel(void) {
     struct stat st;
     if (stat("/tmp/cava_bars.txt", &st) != 0) return -1;
     time_t now = time(NULL);
@@ -19,29 +19,36 @@ static int checkCavaBars(void) {
 
     FILE *f = fopen("/tmp/cava_bars.txt", "r");
     if (!f) return -1;
-    char buf[256];
+    char buf[512];
     if (!fgets(buf, sizeof(buf), f)) {
         fclose(f);
         return -1;
     }
     fclose(f);
 
+    int maxVal = 0;
     char *p = buf;
     while (*p) {
-        if (*p >= '1' && *p <= '9') {
-            return 1; // Sound is actively vibrating
+        if (*p >= '0' && *p <= '9') {
+            int val = 0;
+            while (*p >= '0' && *p <= '9') {
+                val = val * 10 + (*p - '0');
+                p++;
+            }
+            if (val > maxVal) maxVal = val;
+        } else {
+            p++;
         }
-        p++;
     }
-    return 0; // Pure silence
+    return maxVal;
 }
 
 /**
  * 2. Medium-path: Check NowPlaying playback state file if recent.
  * When media is paused in Spotify, Apple Music, YouTube, etc., rate changes to 0 immediately.
- * Returns: 1 if playing, 0 if paused, -1 if unavailable.
+ * Returns: 80 if actively playing music, 0 if paused, -1 if unavailable.
  */
-static int checkNowPlayingState(void) {
+static int checkNowPlayingLevel(void) {
     struct stat st;
     if (stat("/tmp/nowplaying_state.json", &st) != 0) return -1;
     time_t now = time(NULL);
@@ -59,7 +66,7 @@ static int checkNowPlayingState(void) {
     if (rateStr) {
         rateStr += 12;
         while (*rateStr == ' ') rateStr++;
-        if (*rateStr == '1') return 1;
+        if (*rateStr == '1') return 80;
         if (*rateStr == '0') return 0;
     }
     return -1;
@@ -142,23 +149,27 @@ static bool isCoreAudioPlaying(void) {
     return false;
 }
 
-int main(void) {
-    // 1. Fast-path: Check real-time frequency bars from Cava if active (~30ms latency)
-    int cava = checkCavaBars();
+int main(int argc, char *argv[]) {
+    int level = 0;
+
+    int cava = getCavaPeakLevel();
     if (cava != -1) {
-        fputs(cava == 1 ? "1\n" : "0\n", stdout);
-        return 0;
+        level = cava;
+    } else {
+        int np = checkNowPlayingLevel();
+        if (np != -1) {
+            level = np;
+        } else {
+            level = isCoreAudioPlaying() ? 40 : 0;
+        }
     }
 
-    // 2. Medium-path: Check NowPlaying playback state (~50ms latency)
-    int np = checkNowPlayingState();
-    if (np != -1) {
-        fputs(np == 1 ? "1\n" : "0\n", stdout);
-        return 0;
+    if (argc > 1) {
+        int threshold = atoi(argv[1]);
+        if (threshold <= 0) threshold = 20;
+        fputs(level >= threshold ? "1\n" : "0\n", stdout);
+    } else {
+        printf("%d\n", level);
     }
-
-    // 3. Fallback: CoreAudio hardware output streams
-    bool ca = isCoreAudioPlaying();
-    fputs(ca ? "1\n" : "0\n", stdout);
     return 0;
 }

@@ -79,6 +79,8 @@ let lastContextMenuTimestamp = 0;
 let lastPlusClickTimestamp = 0;
 let audioTimer = null;
 let isCheckingAudio = false;
+let activePlayingTicks = {};
+const DEFAULT_AUDIO_SENSITIVITY = 20;
 
 const debugLog = (msg) => {
   const ts = new Date().toISOString();
@@ -308,11 +310,42 @@ const checkAudio = () => {
   run(cmd, (err, output) => {
     isCheckingAudio = false;
     if (err || !output) return;
-    const isPlaying = output.trim() === '1';
+    const rawVal = parseInt(output.trim(), 10);
+    const currentAudioLevel = isNaN(rawVal) ? 0 : rawVal;
 
-    const needsUpdate = audioSyncInstances.some((inst) => isPlaying ? inst.isPaused : !inst.isPaused);
-    if (needsUpdate) {
-      currentDispatch({ type: 'AUDIO_STATUS_CHANGED', isPlaying });
+    const now = Date.now();
+    let anyStateChanged = false;
+
+    const updatedInstances = (currentWidgetState.instances || []).map((inst) => {
+      if (inst.sticker && inst.audioSync) {
+        const threshold = (typeof inst.audioSensitivity === 'number' && inst.audioSensitivity > 0)
+          ? inst.audioSensitivity
+          : DEFAULT_AUDIO_SENSITIVITY;
+
+        if (currentAudioLevel >= threshold) {
+          activePlayingTicks[inst.id] = now;
+        }
+
+        // 350ms grace release period to avoid stuttering on musical pauses / drops
+        const isPlaying = (currentAudioLevel >= threshold) || ((now - (activePlayingTicks[inst.id] || 0)) < 350);
+
+        if (isPlaying ? inst.isPaused : !inst.isPaused) {
+          anyStateChanged = true;
+          if (isPlaying && inst.isPaused && animFrameState[inst.id]) {
+            animFrameState[inst.id].lastFrameTimestamp = performance.now();
+          }
+          return {
+            ...inst,
+            isPaused: !isPlaying,
+            currentFrame: animFrameState[inst.id]?.currentFrame ?? inst.currentFrame ?? 0,
+          };
+        }
+      }
+      return inst;
+    });
+
+    if (anyStateChanged) {
+      currentDispatch({ type: 'AUDIO_LEVEL_TICK', instances: updatedInstances });
     }
   });
 };
@@ -390,7 +423,12 @@ const getInitialInstances = () => {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${STORAGE_INSTANCES_KEY}_${screenId}`) : null;
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map((inst) => ({
+          ...inst,
+          audioSensitivity: typeof inst.audioSensitivity === 'number' ? inst.audioSensitivity : DEFAULT_AUDIO_SENSITIVITY,
+        }));
+      }
     }
   } catch (e) {}
 
@@ -406,6 +444,8 @@ const getInitialInstances = () => {
     currentFrame: 0,
     w: BASE_SIZE,
     h: BASE_SIZE,
+    audioSync: false,
+    audioSensitivity: DEFAULT_AUDIO_SENSITIVITY,
   }];
 };
 
@@ -718,6 +758,32 @@ export const updateState = (event, previousState) => {
     };
   }
 
+  if (event.type === 'AUDIO_LEVEL_TICK') {
+    const updatedInstances = event.instances || [];
+    saveInstances(updatedInstances);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'SET_AUDIO_SENSITIVITY') {
+    const nextSens = event.audioSensitivity;
+    const targetId = event.instanceId;
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (!targetId || inst.id === targetId) {
+        return { ...inst, audioSensitivity: nextSens };
+      }
+      return inst;
+    });
+    saveInstances(updatedInstances);
+    setTimeout(checkAudio, 10);
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
+  }
+
   if (event.type === 'AUDIO_STATUS_CHANGED') {
     const isPlaying = event.isPlaying;
     const updatedInstances = (previousState.instances || []).map((inst) => {
@@ -943,6 +1009,7 @@ export const updateState = (event, previousState) => {
         w: BASE_SIZE,
         h: BASE_SIZE,
         audioSync: false,
+        audioSensitivity: DEFAULT_AUDIO_SENSITIVITY,
       }];
     } else {
       let posX = defaultPos.x;
@@ -966,6 +1033,7 @@ export const updateState = (event, previousState) => {
         w: BASE_SIZE,
         h: BASE_SIZE,
         audioSync: false,
+        audioSensitivity: DEFAULT_AUDIO_SENSITIVITY,
       };
       updatedInstances = [...current, newInst];
     }
@@ -1279,6 +1347,7 @@ export const render = (state, dispatch) => {
       flipped: Boolean(instance.flipped),
       isPaused: Boolean(instance.isPaused),
       audioSync: Boolean(instance.audioSync),
+      audioSensitivity: typeof instance.audioSensitivity === 'number' ? instance.audioSensitivity : DEFAULT_AUDIO_SENSITIVITY,
       opacity: instance.opacity !== undefined ? instance.opacity : 1.0,
       shadow: instance.shadow !== false,
       enableSnapping: enableSnapping !== false,
@@ -1341,6 +1410,12 @@ export const render = (state, dispatch) => {
           dispatch({ type: 'TOGGLE_PAUSE', instanceId: targetInstId });
         } else if (res.action === 'TOGGLE_AUDIO_SYNC') {
           dispatch({ type: 'TOGGLE_AUDIO_SYNC', instanceId: res.instanceId || instance.id });
+        } else if (res.action === 'SET_AUDIO_SENSITIVITY') {
+          dispatch({
+            type: 'SET_AUDIO_SENSITIVITY',
+            instanceId: res.instanceId || instance.id,
+            audioSensitivity: res.audioSensitivity,
+          });
         } else if (res.action === 'SET_OPACITY') {
           dispatch({ type: 'SET_OPACITY', instanceId: res.instanceId || instance.id, opacity: res.opacity });
         } else if (res.action === 'TOGGLE_SHADOW') {

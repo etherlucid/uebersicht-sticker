@@ -14,6 +14,7 @@ struct MenuState: Codable {
     var flipped: Bool?
     var isPaused: Bool?
     var audioSync: Bool?
+    var audioSensitivity: Int?
     var opacity: Double?
     var shadow: Bool?
     var enableSnapping: Bool?
@@ -2126,6 +2127,27 @@ if mode == "PLUS_CLICK" {
     exit(0)
 }
 
+func promptForCustomSensitivity(current: Int) -> Int? {
+    let alert = NSAlert()
+    alert.messageText = "Audio Sync Sensitivity"
+    alert.informativeText = "Enter an audio threshold from 1 (most sensitive) to 100 (loudest):\n\n• 5 = Very High (triggers on whispers & vocal fry)\n• 20 = Medium (default — filters vocal fry, triggers on music)\n• 35 = Low (filters meeting chatter, music only)\n• 55 = Very Low (heavy beats only)"
+    alert.addButton(withTitle: "Save")
+    alert.addButton(withTitle: "Cancel")
+    let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+    input.stringValue = "\(current)"
+    alert.accessoryView = input
+    alert.window.initialFirstResponder = input
+    NSApp.activate(ignoringOtherApps: true)
+    let response = alert.runModal()
+    if response == .alertFirstButtonReturn {
+        let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let val = Int(text) {
+            return max(1, min(100, val))
+        }
+    }
+    return nil
+}
+
 // CONTEXT_MENU mode
 let menu = NSMenu(title: "Sticker Controls")
 menu.autoenablesItems = false
@@ -2255,6 +2277,40 @@ if hasSticker {
     syncItem.representedObject = "{\"action\":\"TOGGLE_AUDIO_SYNC\",\"instanceId\":\"\(instanceId)\"}"
     if hasAudioSync { syncItem.state = .on }
     menu.addItem(syncItem)
+
+    // Audio Sensitivity Submenu
+    let currentSens = state.audioSensitivity ?? 20
+    let sensParent = NSMenuItem(title: "Audio Sensitivity", action: nil, keyEquivalent: "")
+    let sensMenu = NSMenu(title: "Audio Sensitivity")
+    sensMenu.autoenablesItems = false
+    let sensOptions: [(String, Int)] = [
+        ("Very High (All Sounds & Whispers - 5)", 5),
+        ("High (Sensitive - 10)", 10),
+        ("Medium (Normal - Filters Quiet Voice - 20)", 20),
+        ("Low (Music Only - Filters Vocal Fry & Meetings - 35)", 35),
+        ("Very Low (Loud Beats Only - 55)", 55)
+    ]
+    for (label, val) in sensOptions {
+        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = "{\"action\":\"SET_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"audioSensitivity\":\(val)}"
+        if currentSens == val {
+            item.state = .on
+        }
+        sensMenu.addItem(item)
+    }
+
+    sensMenu.addItem(NSMenuItem.separator())
+    let isCustom = !sensOptions.contains { $0.1 == currentSens }
+    let customTitle = isCustom ? "Custom Threshold (\(currentSens))…" : "Custom Threshold…"
+    let customSensItem = NSMenuItem(title: customTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    customSensItem.target = delegate
+    customSensItem.representedObject = "{\"action\":\"CUSTOM_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"current\":\(currentSens)}"
+    if isCustom { customSensItem.state = .on }
+    sensMenu.addItem(customSensItem)
+
+    sensParent.submenu = sensMenu
+    menu.addItem(sensParent)
 }
 
 menu.addItem(NSMenuItem.separator())
@@ -2347,6 +2403,11 @@ if let action = delegate.outputAction {
     } else if action.contains("TRIGGER_FINDER_PICKER") {
         if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
             print(result)
+        }
+    } else if action.contains("CUSTOM_AUDIO_SENSITIVITY") {
+        let currentSens = state.audioSensitivity ?? 20
+        if let val = promptForCustomSensitivity(current: currentSens) {
+            print("{\"action\":\"SET_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"audioSensitivity\":\(val)}")
         }
     } else if action.contains("SNAP_TO_EXTERNAL_DISPLAY") {
         let result = syncWidgetsToTargetDisplay(targetPattern: state.targetName ?? "ASUS")
