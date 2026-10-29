@@ -2284,11 +2284,11 @@ if hasSticker {
     let sensMenu = NSMenu(title: "Audio Sensitivity")
     sensMenu.autoenablesItems = false
     let sensOptions: [(String, Int)] = [
-        ("Very High", 5),
-        ("High", 10),
-        ("Medium", 20),
-        ("Low", 35),
-        ("Very Low", 55)
+        ("Very High (5)", 5),
+        ("High (10)", 10),
+        ("Medium (20)", 20),
+        ("Low (35)", 35),
+        ("Very Low (55)", 55)
     ]
     for (label, val) in sensOptions {
         let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
