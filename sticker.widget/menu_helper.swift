@@ -2129,8 +2129,8 @@ if mode == "PLUS_CLICK" {
 
 func promptForCustomSensitivity(current: Int) -> Int? {
     let alert = NSAlert()
-    alert.messageText = "Audio Sync Sensitivity"
-    alert.informativeText = "Enter an audio threshold from 1 (most sensitive) to 100 (loudest):\n\n• 5 = Very High (triggers on whispers & vocal fry)\n• 20 = Medium (default — filters vocal fry, triggers on music)\n• 35 = Low (filters meeting chatter, music only)\n• 55 = Very Low (heavy beats only)"
+    alert.messageText = "Audio Sensitivity"
+    alert.informativeText = "Enter threshold (1–100):"
     alert.addButton(withTitle: "Save")
     alert.addButton(withTitle: "Cancel")
     let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
@@ -2284,11 +2284,11 @@ if hasSticker {
     let sensMenu = NSMenu(title: "Audio Sensitivity")
     sensMenu.autoenablesItems = false
     let sensOptions: [(String, Int)] = [
-        ("Very High (All Sounds & Whispers - 5)", 5),
-        ("High (Sensitive - 10)", 10),
-        ("Medium (Normal - Filters Quiet Voice - 20)", 20),
-        ("Low (Music Only - Filters Vocal Fry & Meetings - 35)", 35),
-        ("Very Low (Loud Beats Only - 55)", 55)
+        ("Very High", 5),
+        ("High", 10),
+        ("Medium", 20),
+        ("Low", 35),
+        ("Very Low", 55)
     ]
     for (label, val) in sensOptions {
         let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
@@ -2302,7 +2302,7 @@ if hasSticker {
 
     sensMenu.addItem(NSMenuItem.separator())
     let isCustom = !sensOptions.contains { $0.1 == currentSens }
-    let customTitle = isCustom ? "Custom Threshold (\(currentSens))…" : "Custom Threshold…"
+    let customTitle = isCustom ? "Custom (\(currentSens))…" : "Custom…"
     let customSensItem = NSMenuItem(title: customTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
     customSensItem.target = delegate
     customSensItem.representedObject = "{\"action\":\"CUSTOM_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"current\":\(currentSens)}"
