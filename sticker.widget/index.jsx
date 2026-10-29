@@ -350,29 +350,43 @@ const checkAudio = () => {
   });
 };
 
-const getScreenId = () => {
-  if (typeof window !== 'undefined' && window.location && window.location.pathname) {
-    const parts = window.location.pathname.split('/').filter(Boolean);
-    if (parts.length > 0 && !isNaN(Number(parts[0]))) {
-      return `screen_${parts[0]}`;
-    }
+let syncChannel = null;
+try {
+  if (typeof BroadcastChannel !== 'undefined') {
+    syncChannel = new BroadcastChannel('uebersicht_multi_screen_sync');
   }
-  const w = typeof window !== 'undefined' ? window.screen.width : 1920;
-  const h = typeof window !== 'undefined' ? window.screen.height : 1080;
-  return `screen_${w}x${h}`;
+} catch (e) {}
+
+const getScreenId = () => {
+  try {
+    if (typeof window !== 'undefined' && window.location && window.location.pathname) {
+      const match = window.location.pathname.match(/\/(\d+)/);
+      if (match) return `screen_${match[1]}`;
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      if (parts.length > 0 && !isNaN(Number(parts[0]))) {
+        return `screen_${parts[0]}`;
+      }
+    }
+  } catch (e) {}
+  try {
+    if (typeof window !== 'undefined' && window.screen) {
+      return `screen_${window.screen.width}x${window.screen.height}`;
+    }
+  } catch (e) {}
+  return 'screen_0';
 };
 
-const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false, enableSnapping = true) => {
+const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false, enableSnapping = true, allowOverflow = true) => {
   const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
   const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
 
   const maxX = Math.max(0, winW - cardWidth);
   const maxY = Math.max(0, winH - cardHeight);
 
-  let newX = Math.max(0, Math.min(maxX, rawX));
+  let newX = allowOverflow ? rawX : Math.max(0, Math.min(maxX, rawX));
   let newY = Math.max(0, Math.min(maxY, rawY));
 
-  if (enableSnapping && !bypassSnap) {
+  if (enableSnapping && !bypassSnap && newX >= 0 && newX <= maxX) {
     const snapTop = SNAP_MARGIN_TOP;
     const snapBottom = Math.max(0, winH - cardHeight - SNAP_MARGIN_BOTTOM);
     const snapLeft = SNAP_MARGIN_X;
@@ -401,33 +415,32 @@ const getInitialPosition = (cardW, cardH) => {
   };
 };
 
-const RESET_STICKERS_FLAG = 'sticker_reset_top_left_v5';
-try {
-  if (typeof localStorage !== 'undefined') {
-    if (localStorage.getItem(RESET_STICKERS_FLAG) !== 'done') {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const key = localStorage.key(i);
-        if (key && (key.startsWith(STORAGE_INSTANCES_KEY) || key === STORAGE_INSTANCES_KEY)) {
-          localStorage.removeItem(key);
-        }
-      }
-      localStorage.setItem('sticker_force_blank_once', 'true');
-      localStorage.setItem(RESET_STICKERS_FLAG, 'done');
-    }
-  }
-} catch (e) {}
-
 const getInitialInstances = () => {
-  const screenId = getScreenId();
   try {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${STORAGE_INSTANCES_KEY}_${screenId}`) : null;
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_INSTANCES_KEY) : null;
     if (saved) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed.map((inst) => ({
           ...inst,
+          targetScreen: inst.targetScreen || 'screen_1',
           audioSensitivity: typeof inst.audioSensitivity === 'number' ? inst.audioSensitivity : DEFAULT_AUDIO_SENSITIVITY,
         }));
+      }
+    }
+
+    // Migration from screen_1 where stickers were actively kept
+    const screen1Saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${STORAGE_INSTANCES_KEY}_screen_1`) : null;
+    if (screen1Saved) {
+      const parsed1 = JSON.parse(screen1Saved);
+      if (Array.isArray(parsed1) && parsed1.length > 0) {
+        const migrated = parsed1.map((inst) => ({
+          ...inst,
+          targetScreen: inst.targetScreen || 'screen_1',
+          audioSensitivity: typeof inst.audioSensitivity === 'number' ? inst.audioSensitivity : DEFAULT_AUDIO_SENSITIVITY,
+        }));
+        localStorage.setItem(STORAGE_INSTANCES_KEY, JSON.stringify(migrated));
+        return migrated;
       }
     }
   } catch (e) {}
@@ -436,6 +449,7 @@ const getInitialInstances = () => {
   return [{
     id: 'default',
     sticker: null,
+    targetScreen: 'screen_1',
     x: defaultPos.x,
     y: defaultPos.y,
     scale: 1.0,
@@ -452,8 +466,8 @@ const getInitialInstances = () => {
 const saveInstances = (instances) => {
   const screenId = getScreenId();
   try {
-    localStorage.setItem(`${STORAGE_INSTANCES_KEY}_${screenId}`, JSON.stringify(instances));
     localStorage.setItem(STORAGE_INSTANCES_KEY, JSON.stringify(instances));
+    localStorage.setItem(`${STORAGE_INSTANCES_KEY}_${screenId}`, JSON.stringify(instances));
   } catch (e) {}
 };
 
@@ -570,10 +584,118 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'END_DRAG') {
+    const draggingId = previousState.draggingInstanceId;
+    const currentInst = (previousState.instances || []).find((i) => i.id === draggingId);
+    if (!currentInst) {
+      return {
+        ...previousState,
+        isDragging: false,
+        draggingInstanceId: null,
+      };
+    }
+
+    const cardW = previousState.startW || BLANK_SQUARE_SIZE;
+    const cardH = previousState.startH || BLANK_SQUARE_SIZE;
+    const curX = currentInst.x ?? 0;
+    const curY = currentInst.y ?? 0;
+
+    const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
+    const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
+    const currentScreenId = getScreenId();
+
+    let targetScreen = currentInst.targetScreen || currentScreenId;
+    let finalX = curX;
+    let finalY = Math.max(14, Math.min(winH - cardH - 14, curY));
+
+    // Monitor arrangement: screen_0 (LG WFHD, left, 2560x1080) <-> screen_1 (ASUS PB287Q, right, 1080x1920)
+    if (currentScreenId === 'screen_0' && curX + (cardW / 3) > winW) {
+      targetScreen = 'screen_1';
+      finalX = 14;
+    } else if (currentScreenId === 'screen_1' && curX < -(cardW / 3)) {
+      targetScreen = 'screen_0';
+      finalX = Math.max(14, 2560 - cardW - 14);
+    } else {
+      finalX = Math.max(0, Math.min(winW - cardW, curX));
+    }
+
+    const updatedInstances = (previousState.instances || []).map((inst) => {
+      if (inst.id === draggingId) {
+        return { ...inst, targetScreen, x: finalX, y: finalY };
+      }
+      return inst;
+    });
+
+    saveInstances(updatedInstances);
+
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'sticker',
+        type: 'SYNC_INSTANCES',
+        instances: updatedInstances,
+      });
+    }
+
     return {
       ...previousState,
       isDragging: false,
       draggingInstanceId: null,
+      instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'SYNC_INSTANCES') {
+    return {
+      ...previousState,
+      instances: event.instances,
+    };
+  }
+
+  if (event.type === 'COLLAPSE_TO_SINGLE_SCREEN') {
+    let changed = false;
+    const updated = (previousState.instances || []).map((inst) => {
+      if (inst.targetScreen && inst.targetScreen !== 'screen_0') {
+        changed = true;
+        return { ...inst, targetScreen: 'screen_0' };
+      }
+      return inst;
+    });
+    if (changed) {
+      saveInstances(updated);
+      if (syncChannel) {
+        syncChannel.postMessage({
+          widget: 'sticker',
+          type: 'SYNC_INSTANCES',
+          instances: updated,
+        });
+      }
+      return {
+        ...previousState,
+        instances: updated,
+      };
+    }
+    return previousState;
+  }
+
+  if (event.type === 'MOVE_TO_SCREEN') {
+    const targetId = event.instanceId;
+    const targetScreen = event.screenId || 'screen_1';
+    const updated = (previousState.instances || []).map((inst) => {
+      if (inst.id === targetId) {
+        return { ...inst, targetScreen, x: SNAP_MARGIN_X, y: SNAP_MARGIN_TOP };
+      }
+      return inst;
+    });
+    saveInstances(updated);
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'sticker',
+        type: 'SYNC_INSTANCES',
+        instances: updated,
+      });
+    }
+    return {
+      ...previousState,
+      instances: updated,
     };
   }
 
@@ -594,20 +716,57 @@ export const updateState = (event, previousState) => {
         initialH = BASE_SIZE;
       }
     }
-    const updatedInstances = (previousState.instances || []).map((inst) => {
-      if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
-        return {
-          ...inst,
-          sticker: event.sticker,
-          isPaused: false,
-          currentFrame: 0,
-          w: initialW || null,
-          h: initialH || null,
-        };
-      }
-      return inst;
-    });
+    const curScreenId = getScreenId();
+    let isBlankPlaceholder = Boolean(targetId && targetId.startsWith('blank_'));
+    let hasTarget = (previousState.instances || []).some(i => i.id === targetId);
+
+    let updatedInstances;
+    let effectiveTargetId = targetId;
+
+    if (isBlankPlaceholder || !hasTarget) {
+      effectiveTargetId = `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
+      const newInst = {
+        id: effectiveTargetId,
+        targetScreen: curScreenId,
+        sticker: event.sticker,
+        x: SNAP_MARGIN_X,
+        y: SNAP_MARGIN_TOP,
+        scale: 1.0,
+        flipped: false,
+        isPaused: false,
+        currentFrame: 0,
+        w: initialW || BASE_SIZE,
+        h: initialH || BASE_SIZE,
+        audioSync: false,
+        audioSensitivity: DEFAULT_AUDIO_SENSITIVITY,
+      };
+      updatedInstances = [...(previousState.instances || []), newInst];
+    } else {
+      updatedInstances = (previousState.instances || []).map((inst) => {
+        if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
+          return {
+            ...inst,
+            targetScreen: inst.targetScreen || curScreenId,
+            sticker: event.sticker,
+            isPaused: false,
+            currentFrame: 0,
+            w: initialW || null,
+            h: initialH || null,
+          };
+        }
+        return inst;
+      });
+    }
+
     saveInstances(updatedInstances);
+
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'sticker',
+        type: 'SYNC_INSTANCES',
+        instances: updatedInstances,
+      });
+    }
 
     if (!meta) {
       loadStickerMeta(event.sticker, (loadedMeta) => {
@@ -623,7 +782,7 @@ export const updateState = (event, previousState) => {
           if (currentDispatch) {
             currentDispatch({
               type: 'SET_NATURAL_SIZE',
-              instanceId: targetId,
+              instanceId: effectiveTargetId,
               w: fitW,
               h: fitH,
             });
@@ -1023,6 +1182,7 @@ export const updateState = (event, previousState) => {
       newInstId = `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
       const newInst = {
         id: newInstId,
+        targetScreen: targetScreen || curScreenId,
         sticker: event.sticker,
         x: posX,
         y: posY,
@@ -1039,6 +1199,13 @@ export const updateState = (event, previousState) => {
     }
 
     saveInstances(updatedInstances);
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'sticker',
+        type: 'SYNC_INSTANCES',
+        instances: updatedInstances,
+      });
+    }
 
     loadStickerMeta(event.sticker, (loadedMeta) => {
       if (loadedMeta && loadedMeta.width && loadedMeta.height) {
@@ -1069,6 +1236,7 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'DUPLICATE_WIDGET') {
+    const curScreenId = getScreenId();
     const current = previousState.instances && previousState.instances.length > 0
       ? previousState.instances
       : [{ id: 'default', x: 100, y: 100, scale: 1.0, flipped: false, sticker: null }];
@@ -1076,12 +1244,20 @@ export const updateState = (event, previousState) => {
     const newInst = {
       ...target,
       id: `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      targetScreen: target.targetScreen || curScreenId,
       x: (target.x ?? 100) + 30,
       y: (target.y ?? 100) + 30,
       sticker: target.sticker || null,
     };
     const updatedInstances = [...current, newInst];
     saveInstances(updatedInstances);
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'sticker',
+        type: 'SYNC_INSTANCES',
+        instances: updatedInstances,
+      });
+    }
     return {
       ...previousState,
       instances: updatedInstances,
@@ -1090,37 +1266,19 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'REMOVE_WIDGET') {
     const current = previousState.instances || [];
-    if (current.length > 1) {
-      const updatedInstances = current.filter((i) => i.id !== event.instanceId);
-      saveInstances(updatedInstances);
-      return {
-        ...previousState,
+    const updatedInstances = current.filter((i) => i.id !== event.instanceId);
+    saveInstances(updatedInstances);
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'sticker',
+        type: 'SYNC_INSTANCES',
         instances: updatedInstances,
-      };
-    } else {
-      // When no more widgets on this monitor, maintain the blank plus square so the system is always accessible
-      const target = current[0];
-      delete animFrameState[target?.id];
-      const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
-      const blankInst = {
-        id: target?.id || 'default',
-        sticker: null,
-        x: target?.x ?? defaultPos.x,
-        y: target?.y ?? defaultPos.y,
-        scale: 1.0,
-        flipped: false,
-        isPaused: false,
-        currentFrame: 0,
-        w: BASE_SIZE,
-        h: BASE_SIZE,
-      };
-      const updatedInstances = [blankInst];
-      saveInstances(updatedInstances);
-      return {
-        ...previousState,
-        instances: updatedInstances,
-      };
+      });
     }
+    return {
+      ...previousState,
+      instances: updatedInstances,
+    };
   }
 
   if (event.type === 'ORDER_CHANGED') {
@@ -1142,19 +1300,51 @@ if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_sticker
   });
 }
 
-if (typeof window !== 'undefined' && !window.__uebersicht_display_sync_listener) {
-  window.__uebersicht_display_sync_listener = true;
-  let lastSyncTime = 0;
-  const triggerAutoDisplaySync = () => {
-    const now = Date.now();
-    if (now - lastSyncTime < 4000) return;
-    lastSyncTime = now;
-    const cmd = getHelperCmd(JSON.stringify({ mode: 'SYNC_DISPLAYS' }));
-    run(cmd);
+if (typeof window !== 'undefined' && !window.__uebersicht_sticker_sync_listener) {
+  window.__uebersicht_sticker_sync_listener = true;
+
+  if (syncChannel) {
+    syncChannel.addEventListener('message', (event) => {
+      const data = event.data;
+      if (data && data.widget === 'sticker' && data.type === 'SYNC_INSTANCES' && currentDispatch) {
+        currentDispatch({
+          type: 'SYNC_INSTANCES',
+          instances: data.instances,
+        });
+      }
+    });
+  }
+
+  window.addEventListener('storage', (event) => {
+    if ((event.key === STORAGE_INSTANCES_KEY || event.key === 'sticker_widget_instances') && event.newValue && currentDispatch) {
+      try {
+        const parsed = JSON.parse(event.newValue);
+        if (Array.isArray(parsed)) {
+          currentDispatch({
+            type: 'SYNC_INSTANCES',
+            instances: parsed,
+          });
+        }
+      } catch (e) {}
+    }
+  });
+
+  const checkScreens = () => {
+    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
+    const fallbackPath = './sticker.widget/menu_helper';
+    run(`"${helperPath}" --screens 2>/dev/null || "${fallbackPath}" --screens 2>/dev/null`, (err, out) => {
+      if (err || !out) return;
+      try {
+        const screens = JSON.parse(out.trim());
+        if (Array.isArray(screens) && screens.length === 1 && currentDispatch) {
+          currentDispatch({ type: 'COLLAPSE_TO_SINGLE_SCREEN' });
+        }
+      } catch (e) {}
+    });
   };
 
-  window.addEventListener('resize', triggerAutoDisplaySync);
-  setTimeout(triggerAutoDisplaySync, 2000);
+  window.addEventListener('resize', checkScreens);
+  setTimeout(checkScreens, 1500);
 }
 
 export const render = (state, dispatch) => {
@@ -1172,9 +1362,33 @@ export const render = (state, dispatch) => {
   // Ensure sprite sheet animation loop is running
   ensureAnimLoopRunning();
 
-  let instances = (currentState && currentState.instances && currentState.instances.length > 0)
+  const currentScreenId = getScreenId();
+  const allInstances = (currentState && currentState.instances && currentState.instances.length > 0)
     ? currentState.instances
     : getInitialInstances();
+
+  const screenInstances = allInstances.filter((inst) => {
+    const s = inst.targetScreen || 'screen_1';
+    return s === currentScreenId;
+  });
+
+  let instances = screenInstances.length > 0
+    ? screenInstances
+    : [{
+        id: `blank_${currentScreenId}`,
+        sticker: null,
+        targetScreen: currentScreenId,
+        x: SNAP_MARGIN_X,
+        y: SNAP_MARGIN_TOP,
+        scale: 1.0,
+        flipped: false,
+        isPaused: false,
+        currentFrame: 0,
+        w: BASE_SIZE,
+        h: BASE_SIZE,
+        audioSync: false,
+        audioSensitivity: DEFAULT_AUDIO_SENSITIVITY,
+      }];
 
   // Manage Audio Sync Polling (fast 200ms responsive loop)
   const hasAudioSync = instances.some((inst) => inst.sticker && inst.audioSync);
@@ -1351,6 +1565,7 @@ export const render = (state, dispatch) => {
       opacity: instance.opacity !== undefined ? instance.opacity : 1.0,
       shadow: instance.shadow !== false,
       enableSnapping: enableSnapping !== false,
+      screenId: instance.targetScreen || currentScreenId,
       x: Math.round(instance.x ?? 100),
       y: Math.round(instance.y ?? 100),
     });
@@ -1424,6 +1639,8 @@ export const render = (state, dispatch) => {
           dispatch({ type: 'TOGGLE_SNAPPING' });
         } else if (res.action === 'RESET_POSITION') {
           dispatch({ type: 'RESET_POSITION', instanceId: res.instanceId || instance.id });
+        } else if (res.action === 'MOVE_TO_SCREEN') {
+          dispatch({ type: 'MOVE_TO_SCREEN', instanceId: res.instanceId || instance.id, screenId: res.screenId });
         } else if (res.action === 'RELOAD_WIDGET') {
           const wid = res.widgetId || 'sticker-widget-index-jsx';
           run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
