@@ -19,6 +19,7 @@ struct MenuState: Codable {
     var shadow: Bool?
     var enableSnapping: Bool?
     var screenId: String?
+    var hiddenPlusScreens: [String]?
     var x: Int?
     var y: Int?
 }
@@ -2179,6 +2180,16 @@ menu.autoenablesItems = false
 
 let hasSticker = state.currentSticker != nil && !(state.currentSticker?.isEmpty ?? true)
 
+// 0. Hide '+' Option if on an empty screen placeholder
+if !hasSticker {
+    let curSid = state.screenId ?? "screen_0"
+    let hidePlusItem = NSMenuItem(title: "Hide '+' on This Display", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    hidePlusItem.target = delegate
+    hidePlusItem.representedObject = "{\"action\":\"HIDE_PLUS_ON_SCREEN\",\"screenId\":\"\(curSid)\"}"
+    menu.addItem(hidePlusItem)
+    menu.addItem(NSMenuItem.separator())
+}
+
 // 1. Sticker Management Section
 let managerMenuItem = NSMenuItem(title: "🖼️ Sticker Library…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 managerMenuItem.target = delegate
@@ -2390,17 +2401,36 @@ if screens.count > 1 {
     let dispMenu = NSMenu(title: "Display")
     dispMenu.autoenablesItems = false
     let currentScreen = state.screenId ?? "screen_1"
+    let hiddenPlusList = state.hiddenPlusScreens ?? []
+
+    if hasSticker {
+        for (i, s) in screens.enumerated() {
+            let sid = "screen_\(i)"
+            let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
+            let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = "{\"action\":\"MOVE_TO_SCREEN\",\"screenId\":\"\(sid)\",\"instanceId\":\"\(instanceId)\"}"
+            if currentScreen == sid {
+                item.state = .on
+            }
+            dispMenu.addItem(item)
+        }
+        dispMenu.addItem(NSMenuItem.separator())
+    }
+
     for (i, s) in screens.enumerated() {
         let sid = "screen_\(i)"
         let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
-        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        let isHidden = hiddenPlusList.contains(sid)
+        let item = NSMenuItem(title: "Show '+' on \(label)", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
         item.target = delegate
-        item.representedObject = "{\"action\":\"MOVE_TO_SCREEN\",\"screenId\":\"\(sid)\",\"instanceId\":\"\(instanceId)\"}"
-        if currentScreen == sid {
+        item.representedObject = "{\"action\":\"TOGGLE_SHOW_PLUS\",\"screenId\":\"\(sid)\"}"
+        if !isHidden {
             item.state = .on
         }
         dispMenu.addItem(item)
     }
+
     dispParent.submenu = dispMenu
     menu.addItem(dispParent)
 }
@@ -2418,9 +2448,15 @@ dupItem.representedObject = "{\"action\":\"DUPLICATE_WIDGET\",\"instanceId\":\"\
 menu.addItem(dupItem)
 
 // Remove Widget
-let removeItem = NSMenuItem(title: "Remove Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+let removeTitle = hasSticker ? "Remove Widget" : "Hide '+' on This Display"
+let removeItem = NSMenuItem(title: removeTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 removeItem.target = delegate
-removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"instanceId\":\"\(instanceId)\",\"widgetId\":\"\(widgetId)\"}"
+if hasSticker {
+    removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"instanceId\":\"\(instanceId)\",\"widgetId\":\"\(widgetId)\"}"
+} else {
+    let curSid = state.screenId ?? "screen_0"
+    removeItem.representedObject = "{\"action\":\"HIDE_PLUS_ON_SCREEN\",\"screenId\":\"\(curSid)\"}"
+}
 menu.addItem(removeItem)
 
 // Pop up native menu above all windows at cursor location

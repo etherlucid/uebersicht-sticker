@@ -12,6 +12,7 @@ const STORAGE_OPACITY_KEY = 'sticker_widget_opacity';
 const STORAGE_SHADOW_KEY = 'sticker_widget_shadow';
 const STORAGE_SNAP_KEY = 'sticker_widget_snapping';
 const STORAGE_AUDIO_SYNC_KEY = 'sticker_widget_audio_sync';
+const STORAGE_HIDDEN_PLUS_KEY = 'sticker_widget_hidden_plus_screens';
 
 const WIDGET_ORDER_KEY = 'uebersicht_widget_order';
 const DEFAULT_WIDGET_ORDER = ['sticker', 'cava', 'shell', 'nowplaying'];
@@ -509,10 +510,28 @@ const getInitialAudioSync = () => {
   return false;
 };
 
+const getHiddenPlusScreens = () => {
+  try {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_HIDDEN_PLUS_KEY) : null;
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (e) {}
+  return [];
+};
+
+const saveHiddenPlusScreens = (screens) => {
+  try {
+    localStorage.setItem(STORAGE_HIDDEN_PLUS_KEY, JSON.stringify(screens));
+  } catch (e) {}
+};
+
 const initialInstances = getInitialInstances();
 
 export const initialState = {
   instances: initialInstances,
+  hiddenPlusScreens: getHiddenPlusScreens(),
   opacity: getInitialOpacity(),
   shadow: getInitialShadow(),
   enableSnapping: getInitialSnapping(),
@@ -696,6 +715,57 @@ export const updateState = (event, previousState) => {
     return {
       ...previousState,
       instances: updated,
+    };
+  }
+
+  if (event.type === 'HIDE_PLUS_ON_SCREEN') {
+    const sid = event.screenId || getScreenId();
+    const current = previousState.hiddenPlusScreens || [];
+    if (!current.includes(sid)) {
+      const updated = [...current, sid];
+      saveHiddenPlusScreens(updated);
+      if (syncChannel) {
+        syncChannel.postMessage({
+          widget: 'sticker',
+          type: 'SYNC_HIDDEN_PLUS',
+          hiddenPlusScreens: updated,
+        });
+      }
+      return {
+        ...previousState,
+        hiddenPlusScreens: updated,
+      };
+    }
+    return previousState;
+  }
+
+  if (event.type === 'TOGGLE_SHOW_PLUS') {
+    const sid = event.screenId || getScreenId();
+    const current = previousState.hiddenPlusScreens || [];
+    let updated;
+    if (current.includes(sid)) {
+      updated = current.filter((s) => s !== sid);
+    } else {
+      updated = [...current, sid];
+    }
+    saveHiddenPlusScreens(updated);
+    if (syncChannel) {
+      syncChannel.postMessage({
+        widget: 'sticker',
+        type: 'SYNC_HIDDEN_PLUS',
+        hiddenPlusScreens: updated,
+      });
+    }
+    return {
+      ...previousState,
+      hiddenPlusScreens: updated,
+    };
+  }
+
+  if (event.type === 'SYNC_HIDDEN_PLUS') {
+    return {
+      ...previousState,
+      hiddenPlusScreens: event.hiddenPlusScreens || [],
     };
   }
 
@@ -1265,6 +1335,26 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'REMOVE_WIDGET') {
+    if (event.instanceId && event.instanceId.startsWith('blank_')) {
+      const sid = getScreenId();
+      const current = previousState.hiddenPlusScreens || [];
+      if (!current.includes(sid)) {
+        const updated = [...current, sid];
+        saveHiddenPlusScreens(updated);
+        if (syncChannel) {
+          syncChannel.postMessage({
+            widget: 'sticker',
+            type: 'SYNC_HIDDEN_PLUS',
+            hiddenPlusScreens: updated,
+          });
+        }
+        return {
+          ...previousState,
+          hiddenPlusScreens: updated,
+        };
+      }
+      return previousState;
+    }
     const current = previousState.instances || [];
     const updatedInstances = current.filter((i) => i.id !== event.instanceId);
     saveInstances(updatedInstances);
@@ -1306,11 +1396,18 @@ if (typeof window !== 'undefined' && !window.__uebersicht_sticker_sync_listener)
   if (syncChannel) {
     syncChannel.addEventListener('message', (event) => {
       const data = event.data;
-      if (data && data.widget === 'sticker' && data.type === 'SYNC_INSTANCES' && currentDispatch) {
-        currentDispatch({
-          type: 'SYNC_INSTANCES',
-          instances: data.instances,
-        });
+      if (data && data.widget === 'sticker' && currentDispatch) {
+        if (data.type === 'SYNC_INSTANCES') {
+          currentDispatch({
+            type: 'SYNC_INSTANCES',
+            instances: data.instances,
+          });
+        } else if (data.type === 'SYNC_HIDDEN_PLUS') {
+          currentDispatch({
+            type: 'SYNC_HIDDEN_PLUS',
+            hiddenPlusScreens: data.hiddenPlusScreens,
+          });
+        }
       }
     });
   }
@@ -1323,6 +1420,16 @@ if (typeof window !== 'undefined' && !window.__uebersicht_sticker_sync_listener)
           currentDispatch({
             type: 'SYNC_INSTANCES',
             instances: parsed,
+          });
+        }
+      } catch (e) {}
+    } else if (event.key === STORAGE_HIDDEN_PLUS_KEY && event.newValue && currentDispatch) {
+      try {
+        const parsed = JSON.parse(event.newValue);
+        if (Array.isArray(parsed)) {
+          currentDispatch({
+            type: 'SYNC_HIDDEN_PLUS',
+            hiddenPlusScreens: parsed,
           });
         }
       } catch (e) {}
@@ -1371,6 +1478,13 @@ export const render = (state, dispatch) => {
     const s = inst.targetScreen || 'screen_1';
     return s === currentScreenId;
   });
+
+  const hiddenPlusScreens = currentState.hiddenPlusScreens || getHiddenPlusScreens();
+  const isPlusHidden = hiddenPlusScreens.includes(currentScreenId);
+
+  if (screenInstances.length === 0 && isPlusHidden) {
+    return <div style={{ display: 'none' }} />;
+  }
 
   let instances = screenInstances.length > 0
     ? screenInstances
@@ -1566,6 +1680,7 @@ export const render = (state, dispatch) => {
       shadow: instance.shadow !== false,
       enableSnapping: enableSnapping !== false,
       screenId: instance.targetScreen || currentScreenId,
+      hiddenPlusScreens: currentState.hiddenPlusScreens || getHiddenPlusScreens(),
       x: Math.round(instance.x ?? 100),
       y: Math.round(instance.y ?? 100),
     });
@@ -1641,6 +1756,10 @@ export const render = (state, dispatch) => {
           dispatch({ type: 'RESET_POSITION', instanceId: res.instanceId || instance.id });
         } else if (res.action === 'MOVE_TO_SCREEN') {
           dispatch({ type: 'MOVE_TO_SCREEN', instanceId: res.instanceId || instance.id, screenId: res.screenId });
+        } else if (res.action === 'HIDE_PLUS_ON_SCREEN') {
+          dispatch({ type: 'HIDE_PLUS_ON_SCREEN', screenId: res.screenId });
+        } else if (res.action === 'TOGGLE_SHOW_PLUS') {
+          dispatch({ type: 'TOGGLE_SHOW_PLUS', screenId: res.screenId });
         } else if (res.action === 'RELOAD_WIDGET') {
           const wid = res.widgetId || 'sticker-widget-index-jsx';
           run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
