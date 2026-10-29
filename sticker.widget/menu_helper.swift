@@ -2390,17 +2390,22 @@ if screens.count > 1 {
     let dispParent = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
     let dispMenu = NSMenu(title: "Display")
     dispMenu.autoenablesItems = false
-    let currentScreen = state.screenId ?? "screen_1"
+    let currentScreen = state.screenId ?? ""
     let hiddenPlusList = state.hiddenPlusScreens ?? []
 
     if hasSticker {
         for (i, s) in screens.enumerated() {
-            let sid = "screen_\(i)"
+            let desc = s.deviceDescription
+            let screenNumber = desc[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+            let sid = "screen_\(screenNumber)"
             let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
             let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
             item.target = delegate
             item.representedObject = "{\"action\":\"MOVE_TO_SCREEN\",\"screenId\":\"\(sid)\",\"instanceId\":\"\(instanceId)\"}"
-            if currentScreen == sid {
+            let isCurrent = (currentScreen == sid) ||
+                            ((currentScreen == "screen_0" || currentScreen == "screen_3") && s == NSScreen.main) ||
+                            ((currentScreen == "screen_1" || currentScreen == "screen_2") && s != NSScreen.main)
+            if isCurrent {
                 item.state = .on
             }
             dispMenu.addItem(item)
@@ -2409,9 +2414,13 @@ if screens.count > 1 {
     }
 
     for (i, s) in screens.enumerated() {
-        let sid = "screen_\(i)"
+        let desc = s.deviceDescription
+        let screenNumber = desc[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+        let sid = "screen_\(screenNumber)"
         let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
-        let isHidden = hiddenPlusList.contains(sid)
+        let isHidden = hiddenPlusList.contains(sid) ||
+                       (s == NSScreen.main && (hiddenPlusList.contains("screen_0") || hiddenPlusList.contains("screen_3"))) ||
+                       (s != NSScreen.main && (hiddenPlusList.contains("screen_1") || hiddenPlusList.contains("screen_2")))
         let item = NSMenuItem(title: "Show '+' on \(label)", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
         item.target = delegate
         item.representedObject = "{\"action\":\"TOGGLE_SHOW_PLUS\",\"screenId\":\"\(sid)\"}"
