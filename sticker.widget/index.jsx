@@ -1847,12 +1847,6 @@ export const render = (state, dispatch) => {
 
         const handleMouseDown = (e) => {
           debugLog(`handleMouseDown: id=${instance.id} button=${e.button} ctrl=${e.ctrlKey}`);
-          if (e.button === 2 || (e.button === 0 && e.ctrlKey)) {
-            if (e.preventDefault) e.preventDefault();
-            if (e.stopPropagation) e.stopPropagation();
-            handleContextMenu(instance, e);
-            return;
-          }
           if (e.button !== 0) return; // Only primary mouse button
 
           const now = Date.now();
@@ -1979,7 +1973,6 @@ export const render = (state, dispatch) => {
                     handlePlusClick(instance.id, clickEvent);
                   }
                 }}
-                onContextMenu={(e) => handleContextMenu(instance, e)}
                 title="Click to select Sticker (GIF, WebP, PNG) (or drag to position, right-click for options)"
               >
                 <svg
@@ -2008,7 +2001,6 @@ export const render = (state, dispatch) => {
                 id={`sticker-interactive-${instance.id}`}
                 style={stickerStyle}
                 onMouseDown={handleMouseDown}
-                onContextMenu={(e) => handleContextMenu(instance, e)}
                 title="Sticker (Drag to move, Double-click to flip, Right-click for options)"
               >
                 <canvas

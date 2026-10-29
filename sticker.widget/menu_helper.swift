@@ -2180,16 +2180,6 @@ menu.autoenablesItems = false
 
 let hasSticker = state.currentSticker != nil && !(state.currentSticker?.isEmpty ?? true)
 
-// 0. Hide '+' Option if on an empty screen placeholder
-if !hasSticker {
-    let curSid = state.screenId ?? "screen_0"
-    let hidePlusItem = NSMenuItem(title: "Hide '+' on This Display", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    hidePlusItem.target = delegate
-    hidePlusItem.representedObject = "{\"action\":\"HIDE_PLUS_ON_SCREEN\",\"screenId\":\"\(curSid)\"}"
-    menu.addItem(hidePlusItem)
-    menu.addItem(NSMenuItem.separator())
-}
-
 // 1. Sticker Management Section
 let managerMenuItem = NSMenuItem(title: "🖼️ Sticker Library…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
 managerMenuItem.target = delegate
