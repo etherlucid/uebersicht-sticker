@@ -454,6 +454,9 @@ export const updateState = (event, previousState) => {
       draggingInstanceId: event.instanceId,
       dragStartX: event.clientX,
       dragStartY: event.clientY,
+      lastClientX: event.clientX,
+      lastClientY: event.clientY,
+      lastBypassSnap: false,
       startPosX: event.startPosX !== undefined ? event.startPosX : (previousState.instances?.[0]?.x || 100),
       startPosY: event.startPosY !== undefined ? event.startPosY : (previousState.instances?.[0]?.y || 100),
       startW: event.w || BLANK_SQUARE_SIZE,
@@ -474,20 +477,43 @@ export const updateState = (event, previousState) => {
       cardW,
       cardH,
       bypassSnap,
-      previousState.enableSnapping,
       true
     );
 
+    let draggingInst = null;
     const updatedInstances = (previousState.instances || []).map((inst) => {
       if (inst.id === previousState.draggingInstanceId) {
-        return { ...inst, x: newX, y: newY };
+        draggingInst = { ...inst, x: newX, y: newY };
+        return draggingInst;
       }
       return inst;
+    });
+
+    const currentScreenId = getScreenId();
+    const crossPreview = computeCrossScreenPreview(
+      currentScreenId,
+      newX,
+      newY,
+      cardW,
+      cardH,
+      {
+        sticker: draggingInst?.sticker || null,
+        flipped: Boolean(draggingInst?.flipped),
+        opacity: draggingInst?.opacity !== undefined ? draggingInst.opacity : 1.0,
+      }
+    );
+
+    broadcastWidgetMessage('sticker', {
+      type: 'CROSS_SCREEN_DRAG_PREVIEW',
+      preview: crossPreview,
     });
 
     return {
       ...previousState,
       instances: updatedInstances,
+      lastClientX: event.clientX,
+      lastClientY: event.clientY,
+      lastBypassSnap: bypassSnap,
     };
   }
 
@@ -495,6 +521,10 @@ export const updateState = (event, previousState) => {
     const draggingId = previousState.draggingInstanceId;
     const currentInst = (previousState.instances || []).find((i) => i.id === draggingId);
     if (!currentInst) {
+      broadcastWidgetMessage('sticker', {
+        type: 'CROSS_SCREEN_DRAG_PREVIEW',
+        preview: null,
+      });
       return {
         ...previousState,
         isDragging: false,
@@ -509,13 +539,16 @@ export const updateState = (event, previousState) => {
     const curY = currentInst.y ?? 0;
     const currentScreenId = getScreenId();
 
-    const { targetScreen, x: finalX, y: finalY } = resolveDragEndAcrossScreens(
+    const { targetScreen, x: finalX, y: finalY } = resolveDragEndAcrossScreens({
       currentScreenId,
       curX,
       curY,
       cardW,
-      cardH
-    );
+      cardH,
+      clientX: event.clientX ?? previousState.lastClientX,
+      clientY: event.clientY ?? previousState.lastClientY,
+      bypassSnap: previousState.lastBypassSnap,
+    });
 
     const updatedInstances = (previousState.instances || []).map((inst) => {
       if (inst.id === draggingId) {
@@ -1267,6 +1300,24 @@ initWidgetDesktopSync({
     './sticker.widget/menu_helper',
   ],
   getDispatch: () => currentDispatch,
+  onSyncPacket: (data, dispatch) => {
+    if (data.type === 'CROSS_SCREEN_DRAG_PREVIEW') {
+      dispatch({
+        type: 'CROSS_SCREEN_DRAG_PREVIEW',
+        preview: data.preview || null,
+      });
+    } else if (data.type === 'SYNC_INSTANCES' && Array.isArray(data.instances)) {
+      dispatch({
+        type: 'SYNC_INSTANCES',
+        instances: data.instances,
+      });
+    } else if (data.type === 'SYNC_HIDDEN_PLUS' && Array.isArray(data.hiddenPlusScreens)) {
+      dispatch({
+        type: 'SYNC_HIDDEN_PLUS',
+        hiddenPlusScreens: data.hiddenPlusScreens,
+      });
+    }
+  },
   storageKeys: [STORAGE_INSTANCES_KEY, STORAGE_HIDDEN_PLUS_KEY],
   onStorageEvent: (event, dispatch) => {
     if ((event.key === STORAGE_INSTANCES_KEY || event.key === 'sticker_widget_instances') && event.newValue) {
@@ -1312,28 +1363,82 @@ export const render = (state, dispatch) => {
   const hiddenPlusScreens = currentState.hiddenPlusScreens || getHiddenPlusScreens();
   const isPlusHidden = hiddenPlusScreens.some((s) => isScreenActive(currentScreenId, s));
 
-  if (screenInstances.length === 0 && isPlusHidden) {
-    if (preview && preview.targetScreen === currentScreenId) {
+  const renderPreviewNode = (p) => {
+    if (!p || p.targetScreen !== currentScreenId) return null;
+    if (p.sticker) {
       return (
         <div
           style={{
             position: 'fixed',
             top: 0,
             left: 0,
-            transform: `translate3d(${Math.round(preview.x)}px, ${Math.round(preview.y)}px, 0)`,
-            width: `${preview.w}px`,
-            height: `${preview.h}px`,
-            borderRadius: '18px',
-            border: '2px dashed rgba(255, 255, 255, 0.5)',
-            background: 'rgba(28, 27, 25, 0.45)',
-            backdropFilter: 'blur(16px)',
-            WebkitBackdropFilter: 'blur(16px)',
-            boxShadow: '0 12px 32px rgba(0, 0, 0, 0.4)',
+            transform: `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0)`,
+            width: `${p.w}px`,
+            height: `${p.h}px`,
             pointerEvents: 'none',
             zIndex: 9999,
+            opacity: (p.opacity !== undefined ? p.opacity : 1.0) * 0.92,
           }}
-        />
+        >
+          <img
+            src={p.sticker}
+            alt=""
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'contain',
+              transform: p.flipped ? 'scaleX(-1)' : 'none',
+              filter: 'drop-shadow(0 8px 20px rgba(0, 0, 0, 0.45))',
+              pointerEvents: 'none',
+              userSelect: 'none',
+              WebkitUserSelect: 'none',
+            }}
+          />
+        </div>
       );
+    }
+    return (
+      <div
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          transform: `translate3d(${Math.round(p.x)}px, ${Math.round(p.y)}px, 0)`,
+          width: `${p.w}px`,
+          height: `${p.h}px`,
+          borderRadius: '16px',
+          border: '1.5px dashed rgba(255, 255, 255, 0.45)',
+          background: 'rgba(28, 27, 25, 0.65)',
+          backdropFilter: 'blur(20px)',
+          WebkitBackdropFilter: 'blur(20px)',
+          boxShadow: '0 12px 32px rgba(0, 0, 0, 0.4)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+          zIndex: 9999,
+        }}
+      >
+        <svg
+          width="42"
+          height="42"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="rgba(242, 242, 247, 0.72)"
+          strokeWidth="2.3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+      </div>
+    );
+  };
+
+  if (screenInstances.length === 0 && isPlusHidden) {
+    if (preview && preview.targetScreen === currentScreenId) {
+      return renderPreviewNode(preview);
     }
     return <div style={{ display: 'none' }} />;
   }
@@ -1505,7 +1610,7 @@ export const render = (state, dispatch) => {
       if (e.stopPropagation) e.stopPropagation();
     }
     const now = Date.now();
-    if (now - lastContextMenuTimestamp < 350) return;
+    if (now - lastContextMenuTimestamp < 30) return;
     lastContextMenuTimestamp = now;
 
     const payload = JSON.stringify({
@@ -1626,26 +1731,7 @@ export const render = (state, dispatch) => {
 
   return (
     <div className="sticker-root">
-      {preview && preview.targetScreen === currentScreenId && (
-        <div
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            transform: `translate3d(${Math.round(preview.x)}px, ${Math.round(preview.y)}px, 0)`,
-            width: `${preview.w}px`,
-            height: `${preview.h}px`,
-            borderRadius: '18px',
-            border: '2px dashed rgba(255, 255, 255, 0.5)',
-            background: 'rgba(28, 27, 25, 0.45)',
-            backdropFilter: 'blur(16px)',
-            WebkitBackdropFilter: 'blur(16px)',
-            boxShadow: '0 12px 32px rgba(0, 0, 0, 0.4)',
-            pointerEvents: 'none',
-            zIndex: 9999,
-          }}
-        />
-      )}
+      {renderPreviewNode(preview)}
       {instances.map((instance, index) => {
         const hasSticker = Boolean(instance.sticker);
         const meta = hasSticker ? stickerMetaCache[instance.sticker] : null;
@@ -1723,7 +1809,6 @@ export const render = (state, dispatch) => {
           const startY = e.clientY;
           let hasMoved = false;
           let rafPending = false;
-          let lastBroadcastOverhang = false;
 
           const handleMouseMove = (moveEvent) => {
             const dx = moveEvent.clientX - startX;
@@ -1761,17 +1846,6 @@ export const render = (state, dispatch) => {
                     clientY,
                     bypassSnap,
                   });
-
-                  const rawX = x + (clientX - startX);
-                  const rawY = y + (clientY - startY);
-                  const crossPreview = computeCrossScreenPreview(currentScreenId, rawX, rawY, instCardW, instCardH);
-                  if (crossPreview || lastBroadcastOverhang) {
-                    lastBroadcastOverhang = Boolean(crossPreview);
-                    broadcastWidgetMessage('sticker', {
-                      type: 'CROSS_SCREEN_DRAG_PREVIEW',
-                      preview: crossPreview,
-                    });
-                  }
                 });
               }
             }
@@ -1781,7 +1855,11 @@ export const render = (state, dispatch) => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
             if (hasMoved) {
-              dispatch({ type: 'END_DRAG' });
+              dispatch({
+                type: 'END_DRAG',
+                clientX: upEvent ? upEvent.clientX : undefined,
+                clientY: upEvent ? upEvent.clientY : undefined,
+              });
             } else if (!hasSticker) {
               handlePlusClick(instance.id, upEvent || e);
             }
