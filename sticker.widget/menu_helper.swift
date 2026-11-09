@@ -179,7 +179,7 @@ func importSticker(sourcePath: String, widgetDir: String, instanceId: String) ->
     let cleanName = originalName.replacingOccurrences(of: " ", with: "_")
     let destPath = (stickersDir as NSString).appendingPathComponent(cleanName)
 
-    let repoStickersDir = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
+    let repoStickersDir = "\(NSHomeDirectory())/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
     let repoDestPath = (repoStickersDir as NSString).appendingPathComponent(cleanName)
 
     do {
@@ -263,9 +263,9 @@ func removeStickerFiles(stickerRelPath: String, widgetDir: String) {
     if baseName.isEmpty { return }
 
     let stickersDir = (widgetDir as NSString).appendingPathComponent("stickers")
-    let repoStickersDir = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
+    let repoStickersDir = "\(NSHomeDirectory())/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
     let widgetDirStr = widgetDir
-    let repoDirStr = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget"
+    let repoDirStr = "\(NSHomeDirectory())/Documents/antigravity/uebersicht-sticker/sticker.widget"
 
     let dirsToCheck = [stickersDir, repoStickersDir, widgetDirStr, repoDirStr]
 
@@ -346,22 +346,22 @@ func syncWidgetsToTargetDisplay(targetPattern: String = "ASUS") -> String {
     var needsUpdate = false
     for widgetKey in targetWidgets {
         var currentSetting = json[widgetKey] ?? [
-            "showOnAllScreens": false,
+            "showOnAllScreens": true,
             "showOnMainScreen": false,
-            "showOnSelectedScreens": true,
+            "showOnSelectedScreens": false,
             "hidden": false,
             "screens": []
         ]
 
-        let curScreens = (currentSetting["screens"] as? [Int]) ?? []
-        let curSelected = (currentSetting["showOnSelectedScreens"] as? Bool) ?? false
+        let curAll = (currentSetting["showOnAllScreens"] as? Bool) ?? false
+        let curHidden = (currentSetting["hidden"] as? Bool) ?? false
 
-        if !curSelected || curScreens != [Int(screenNumber)] {
-            currentSetting["showOnAllScreens"] = false
+        if !curAll || curHidden {
+            currentSetting["showOnAllScreens"] = true
             currentSetting["showOnMainScreen"] = false
-            currentSetting["showOnSelectedScreens"] = true
+            currentSetting["showOnSelectedScreens"] = false
             currentSetting["hidden"] = false
-            currentSetting["screens"] = [Int(screenNumber)]
+            currentSetting["screens"] = []
             json[widgetKey] = currentSetting
             needsUpdate = true
         }
@@ -389,29 +389,26 @@ func ensureScreenEnabledInWidgetSettings(screenNumber: Int, widgetKey: String = 
     }
 
     var currentSetting = json[widgetKey] ?? [
-        "showOnAllScreens": false,
+        "showOnAllScreens": true,
         "showOnMainScreen": false,
-        "showOnSelectedScreens": true,
+        "showOnSelectedScreens": false,
         "hidden": false,
         "screens": []
     ]
 
-    if (currentSetting["showOnAllScreens"] as? Bool) == true {
+    if (currentSetting["showOnAllScreens"] as? Bool) == true && (currentSetting["hidden"] as? Bool) != true {
         return
     }
 
-    var curScreens = (currentSetting["screens"] as? [Int]) ?? []
-    if !curScreens.contains(screenNumber) {
-        curScreens.append(screenNumber)
-        currentSetting["screens"] = curScreens
-        currentSetting["showOnSelectedScreens"] = true
-        currentSetting["showOnAllScreens"] = false
-        currentSetting["hidden"] = false
-        json[widgetKey] = currentSetting
+    currentSetting["screens"] = []
+    currentSetting["showOnSelectedScreens"] = false
+    currentSetting["showOnMainScreen"] = false
+    currentSetting["showOnAllScreens"] = true
+    currentSetting["hidden"] = false
+    json[widgetKey] = currentSetting
 
-        if let newData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-            try? newData.write(to: URL(fileURLWithPath: settingsPath))
-        }
+    if let newData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+        try? newData.write(to: URL(fileURLWithPath: settingsPath))
     }
 }
 
@@ -601,7 +598,7 @@ func resolveStickerPath(_ rel: String?, widgetDir: String) -> String? {
     if FileManager.default.fileExists(atPath: fullWidgetPath) {
         return fullWidgetPath
     }
-    let repoPath = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/\(filename)"
+    let repoPath = "\(NSHomeDirectory())/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/\(filename)"
     if FileManager.default.fileExists(atPath: repoPath) {
         return repoPath
     }
@@ -1158,7 +1155,7 @@ class StickerCutoutStudioController: NSObject, NSWindowDelegate {
             let fileManager = FileManager.default
             let stickersDir = (self.widgetDir as NSString).appendingPathComponent("stickers")
             try? fileManager.createDirectory(atPath: stickersDir, withIntermediateDirectories: true)
-            let repoStickersDir = "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
+            let repoStickersDir = "\(NSHomeDirectory())/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers"
 
             let originalFilename = URL(fileURLWithPath: self.sourcePath).lastPathComponent
             let baseName = (originalFilename as NSString).deletingPathExtension
@@ -1792,7 +1789,8 @@ class StickerManagerController: NSObject, NSWindowDelegate, NSSearchFieldDelegat
         var screenChoices: [ScreenChoice] = []
         for (idx, screen) in screens.enumerated() {
             let name = screen.localizedName
-            let num = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? Int) ?? (idx + 1)
+            let rawNum = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+            let num = rawNum != nil ? Int(rawNum!) : (idx + 1)
             let resW = Int(screen.frame.width)
             let resH = Int(screen.frame.height)
             screenChoices.append(ScreenChoice(
@@ -2392,6 +2390,11 @@ if screens.count > 1 {
     dispMenu.autoenablesItems = false
     let currentScreen = state.screenId ?? ""
     let hiddenPlusList = state.hiddenPlusScreens ?? []
+    let allScreenIds: [String] = screens.map { s in
+        let num = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+        return "screen_\(num)"
+    }
+    let hasExactMatch = allScreenIds.contains(currentScreen)
 
     if hasSticker {
         for (i, s) in screens.enumerated() {
@@ -2402,9 +2405,7 @@ if screens.count > 1 {
             let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
             item.target = delegate
             item.representedObject = "{\"action\":\"MOVE_TO_SCREEN\",\"screenId\":\"\(sid)\",\"instanceId\":\"\(instanceId)\"}"
-            let isCurrent = (currentScreen == sid) ||
-                            ((currentScreen == "screen_0" || currentScreen == "screen_3") && s == NSScreen.main) ||
-                            ((currentScreen == "screen_1" || currentScreen == "screen_2") && s != NSScreen.main)
+            let isCurrent = hasExactMatch ? (currentScreen == sid) : (s == NSScreen.main)
             if isCurrent {
                 item.state = .on
             }
@@ -2418,9 +2419,7 @@ if screens.count > 1 {
         let screenNumber = desc[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
         let sid = "screen_\(screenNumber)"
         let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
-        let isHidden = hiddenPlusList.contains(sid) ||
-                       (s == NSScreen.main && (hiddenPlusList.contains("screen_0") || hiddenPlusList.contains("screen_3"))) ||
-                       (s != NSScreen.main && (hiddenPlusList.contains("screen_1") || hiddenPlusList.contains("screen_2")))
+        let isHidden = hiddenPlusList.contains(sid)
         let item = NSMenuItem(title: "Show '+' on \(label)", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
         item.target = delegate
         item.representedObject = "{\"action\":\"TOGGLE_SHOW_PLUS\",\"screenId\":\"\(sid)\"}"

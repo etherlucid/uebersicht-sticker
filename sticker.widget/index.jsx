@@ -1,4 +1,16 @@
 import { React, run } from 'uebersicht';
+import {
+  getWidgetZIndex,
+  reorderWidget,
+  getScreenId,
+  resolveActiveScreen,
+  isScreenActive,
+  calculateSnappedPosition,
+  computeCrossScreenPreview,
+  resolveDragEndAcrossScreens,
+  broadcastWidgetMessage,
+  initWidgetDesktopSync,
+} from './lib/desktop.js';
 
 export const refreshFrequency = false;
 export const command = 'cat "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/.pending_action" 2>/dev/null || true';
@@ -14,66 +26,8 @@ const STORAGE_SNAP_KEY = 'sticker_widget_snapping';
 const STORAGE_AUDIO_SYNC_KEY = 'sticker_widget_audio_sync';
 const STORAGE_HIDDEN_PLUS_KEY = 'sticker_widget_hidden_plus_screens';
 
-const WIDGET_ORDER_KEY = 'uebersicht_widget_order';
-const DEFAULT_WIDGET_ORDER = ['sticker', 'cava', 'shell', 'nowplaying'];
-
-const getWidgetZIndex = (widgetId) => {
-  try {
-    const raw = localStorage.getItem(WIDGET_ORDER_KEY);
-    let order = raw ? JSON.parse(raw) : [...DEFAULT_WIDGET_ORDER];
-    if (!Array.isArray(order)) order = [...DEFAULT_WIDGET_ORDER];
-    let idx = order.indexOf(widgetId);
-    if (idx === -1) {
-      order.push(widgetId);
-      localStorage.setItem(WIDGET_ORDER_KEY, JSON.stringify(order));
-      idx = order.length - 1;
-    }
-    return 100 + idx * 50;
-  } catch (e) {
-    return 100;
-  }
-};
-
-const reorderWidget = (widgetId, action) => {
-  try {
-    const raw = localStorage.getItem(WIDGET_ORDER_KEY);
-    let order = raw ? JSON.parse(raw) : [...DEFAULT_WIDGET_ORDER];
-    if (!Array.isArray(order)) order = [...DEFAULT_WIDGET_ORDER];
-    if (!order.includes(widgetId)) {
-      order.push(widgetId);
-    }
-    const idx = order.indexOf(widgetId);
-    if (action === 'ORDER_FRONT' || action === 'BRING_TO_FRONT') {
-      order.splice(idx, 1);
-      order.push(widgetId);
-    } else if (action === 'ORDER_BACK' || action === 'SEND_TO_BACK') {
-      order.splice(idx, 1);
-      order.unshift(widgetId);
-    } else if (action === 'ORDER_FORWARD' || action === 'BRING_FORWARD') {
-      if (idx < order.length - 1) {
-        const temp = order[idx];
-        order[idx] = order[idx + 1];
-        order[idx + 1] = temp;
-      }
-    } else if (action === 'ORDER_BACKWARD' || action === 'SEND_BACKWARD') {
-      if (idx > 0) {
-        const temp = order[idx];
-        order[idx] = order[idx - 1];
-        order[idx - 1] = temp;
-      }
-    }
-    localStorage.setItem(WIDGET_ORDER_KEY, JSON.stringify(order));
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('uebersicht:order-changed', { detail: { order } }));
-    }
-  } catch (e) {}
-};
-
-const SNAP_THRESHOLD = 6;
-const SNAP_EDGE_TOLERANCE = 3;
 const SNAP_MARGIN_X = 15;
 const SNAP_MARGIN_TOP = 14;
-const SNAP_MARGIN_BOTTOM = 14;
 
 let lastClickTimestamp = 0;
 let lastContextMenuTimestamp = 0;
@@ -83,23 +37,17 @@ let isCheckingAudio = false;
 let activePlayingTicks = {};
 const DEFAULT_AUDIO_SENSITIVITY = 20;
 
-const debugLog = (msg) => {
-  const ts = new Date().toISOString();
-  const line = `[${ts}] ${msg}\n`.replace(/'/g, "'\\''");
-  run(`printf '%s' '${line}' >> /tmp/sticker_debug.log 2>/dev/null`);
-};
+const debugLog = () => {};
 let currentDispatch = null;
 let currentWidgetState = null;
 
 const getHelperCmd = (payload) => {
   const escapedPayload = payload.replace(/'/g, "'\\''");
   const appHelper = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/StickerManager.app/Contents/MacOS/menu_helper';
-  const appAbs = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/StickerManager.app/Contents/MacOS/menu_helper';
   const appFallback = './sticker.widget/StickerManager.app/Contents/MacOS/menu_helper';
   const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-  const absPath = '/Users/hhamelin/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
   const fallbackPath = './sticker.widget/menu_helper';
-  return `"${appHelper}" '${escapedPayload}' 2>/dev/null || "${appAbs}" '${escapedPayload}' 2>/dev/null || "${appFallback}" '${escapedPayload}' 2>/dev/null || "${helperPath}" '${escapedPayload}' 2>/dev/null || "${absPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
+  return `"${appHelper}" '${escapedPayload}' 2>/dev/null || "${appFallback}" '${escapedPayload}' 2>/dev/null || "${helperPath}" '${escapedPayload}' 2>/dev/null || "${fallbackPath}" '${escapedPayload}' 2>/dev/null`;
 };
 
 // Sprite Sheet Animation Engine
@@ -351,102 +299,7 @@ const checkAudio = () => {
   });
 };
 
-let syncChannel = null;
-try {
-  if (typeof BroadcastChannel !== 'undefined') {
-    syncChannel = new BroadcastChannel('uebersicht_multi_screen_sync');
-  }
-} catch (e) {}
-
-const getScreenId = () => {
-  try {
-    if (typeof window !== 'undefined' && window.location && window.location.pathname) {
-      const match = window.location.pathname.match(/\/(\d+)/);
-      if (match) return `screen_${match[1]}`;
-      const parts = window.location.pathname.split('/').filter(Boolean);
-      if (parts.length > 0 && !isNaN(Number(parts[0]))) {
-        return `screen_${parts[0]}`;
-      }
-    }
-  } catch (e) {}
-  try {
-    if (typeof window !== 'undefined' && window.screen) {
-      return `screen_${window.screen.width}x${window.screen.height}`;
-    }
-  } catch (e) {}
-  return 'screen_3';
-};
-
-const isMainScreen = (screenId) => {
-  if (screenId === 'screen_3' || screenId === 'screen_0') return true;
-  if (typeof window !== 'undefined') {
-    if (window.screen && window.screen.width === 2560) return true;
-    if (window.innerWidth === 2560) return true;
-  }
-  return false;
-};
-
-const isSecondaryScreen = (screenId) => {
-  if (screenId === 'screen_2' || screenId === 'screen_1') return true;
-  if (typeof window !== 'undefined') {
-    if (window.screen && (window.screen.width === 1080 || window.screen.height === 1920)) return true;
-    if (window.innerWidth === 1080 || window.innerHeight === 1920) return true;
-  }
-  return false;
-};
-
-const isScreenActive = (currentScreenId, activeScreen) => {
-  if (!activeScreen) return isMainScreen(currentScreenId);
-  if (activeScreen === currentScreenId) return true;
-  if (activeScreen === 'all') return true;
-
-  const isTargetMain = (activeScreen === 'screen_0' || activeScreen === 'screen_3' || activeScreen.includes('2560'));
-  if (isTargetMain && isMainScreen(currentScreenId)) return true;
-
-  const isTargetSecondary = (activeScreen === 'screen_1' || activeScreen === 'screen_2' || activeScreen.includes('1080x1920'));
-  if (isTargetSecondary && isSecondaryScreen(currentScreenId)) return true;
-
-  // Failsafe: if activeScreen matches neither monitor, ALWAYS show on main monitor so widget is NEVER permanently lost
-  if (!isTargetMain && !isTargetSecondary && isMainScreen(currentScreenId)) {
-    return true;
-  }
-
-  return false;
-};
-
-const calculateSnappedPosition = (rawX, rawY, cardWidth, cardHeight, bypassSnap = false, enableSnapping = true, allowOverflow = true) => {
-  const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
-  const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
-
-  const maxX = Math.max(0, winW - cardWidth);
-  const maxY = Math.max(0, winH - cardHeight);
-
-  let newX = allowOverflow ? rawX : Math.max(0, Math.min(maxX, rawX));
-  let newY = Math.max(0, Math.min(maxY, rawY));
-
-  if (enableSnapping && !bypassSnap && newX >= 0 && newX <= maxX) {
-    const snapTop = SNAP_MARGIN_TOP;
-    const snapBottom = Math.max(0, winH - cardHeight - SNAP_MARGIN_BOTTOM);
-    const snapLeft = SNAP_MARGIN_X;
-    const snapRight = Math.max(0, winW - cardWidth - SNAP_MARGIN_X);
-
-    if (newX >= snapLeft - SNAP_EDGE_TOLERANCE && newX <= snapLeft + SNAP_THRESHOLD) {
-      newX = snapLeft;
-    } else if (newX >= snapRight - SNAP_THRESHOLD && newX <= snapRight + SNAP_EDGE_TOLERANCE) {
-      newX = snapRight;
-    }
-
-    if (newY >= snapTop - SNAP_EDGE_TOLERANCE && newY <= snapTop + SNAP_THRESHOLD) {
-      newY = snapTop;
-    } else if (newY >= snapBottom - SNAP_THRESHOLD && newY <= snapBottom + SNAP_EDGE_TOLERANCE) {
-      newY = snapBottom;
-    }
-  }
-
-  return { x: newX, y: newY };
-};
-
-const getInitialPosition = (cardW, cardH) => {
+const getInitialPosition = () => {
   return {
     x: SNAP_MARGIN_X,
     y: SNAP_MARGIN_TOP,
@@ -461,20 +314,19 @@ const getInitialInstances = () => {
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed.map((inst) => ({
           ...inst,
-          targetScreen: inst.targetScreen || 'screen_1',
+          targetScreen: resolveActiveScreen(inst.targetScreen || 'screen_1'),
           audioSensitivity: typeof inst.audioSensitivity === 'number' ? inst.audioSensitivity : DEFAULT_AUDIO_SENSITIVITY,
         }));
       }
     }
 
-    // Migration from screen_1 where stickers were actively kept
     const screen1Saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${STORAGE_INSTANCES_KEY}_screen_1`) : null;
     if (screen1Saved) {
       const parsed1 = JSON.parse(screen1Saved);
       if (Array.isArray(parsed1) && parsed1.length > 0) {
         const migrated = parsed1.map((inst) => ({
           ...inst,
-          targetScreen: inst.targetScreen || 'screen_1',
+          targetScreen: resolveActiveScreen(inst.targetScreen || 'screen_1'),
           audioSensitivity: typeof inst.audioSensitivity === 'number' ? inst.audioSensitivity : DEFAULT_AUDIO_SENSITIVITY,
         }));
         localStorage.setItem(STORAGE_INSTANCES_KEY, JSON.stringify(migrated));
@@ -483,11 +335,11 @@ const getInitialInstances = () => {
     }
   } catch (e) {}
 
-  const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+  const defaultPos = getInitialPosition();
   return [{
     id: 'default',
     sticker: null,
-    targetScreen: 'screen_1',
+    targetScreen: resolveActiveScreen('screen_1'),
     x: defaultPos.x,
     y: defaultPos.y,
     scale: 1.0,
@@ -581,6 +433,7 @@ export const initialState = {
   startPosY: 0,
   startW: BLANK_SQUARE_SIZE,
   startH: BLANK_SQUARE_SIZE,
+  crossScreenPreview: null,
 };
 
 export const updateState = (event, previousState) => {
@@ -621,7 +474,8 @@ export const updateState = (event, previousState) => {
       cardW,
       cardH,
       bypassSnap,
-      previousState.enableSnapping
+      previousState.enableSnapping,
+      true
     );
 
     const updatedInstances = (previousState.instances || []).map((inst) => {
@@ -630,8 +484,6 @@ export const updateState = (event, previousState) => {
       }
       return inst;
     });
-
-    saveInstances(updatedInstances);
 
     return {
       ...previousState,
@@ -647,6 +499,7 @@ export const updateState = (event, previousState) => {
         ...previousState,
         isDragging: false,
         draggingInstanceId: null,
+        crossScreenPreview: null,
       };
     }
 
@@ -654,26 +507,15 @@ export const updateState = (event, previousState) => {
     const cardH = previousState.startH || BLANK_SQUARE_SIZE;
     const curX = currentInst.x ?? 0;
     const curY = currentInst.y ?? 0;
-
-    const winW = typeof window !== 'undefined' ? (window.innerWidth || 1920) : 1920;
-    const winH = typeof window !== 'undefined' ? (window.innerHeight || 1080) : 1080;
     const currentScreenId = getScreenId();
-    const isMain = isMainScreen(currentScreenId);
 
-    let targetScreen = currentInst.targetScreen || currentScreenId;
-    let finalX = curX;
-    let finalY = Math.max(14, Math.min(winH - cardH - 14, curY));
-
-    // Monitor arrangement: Main (LG WFHD, left, 2560x1080, screen_3) <-> Secondary (ASUS PB287Q, right, 1080x1920, screen_2)
-    if (isMain && curX + (cardW / 3) > winW) {
-      targetScreen = 'screen_2';
-      finalX = 14;
-    } else if (!isMain && curX < -(cardW / 3)) {
-      targetScreen = 'screen_3';
-      finalX = Math.max(14, 2560 - cardW - 14);
-    } else {
-      finalX = Math.max(0, Math.min(winW - cardW, curX));
-    }
+    const { targetScreen, x: finalX, y: finalY } = resolveDragEndAcrossScreens(
+      currentScreenId,
+      curX,
+      curY,
+      cardW,
+      cardH
+    );
 
     const updatedInstances = (previousState.instances || []).map((inst) => {
       if (inst.id === draggingId) {
@@ -684,19 +526,28 @@ export const updateState = (event, previousState) => {
 
     saveInstances(updatedInstances);
 
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'sticker',
-        type: 'SYNC_INSTANCES',
-        instances: updatedInstances,
-      });
-    }
+    broadcastWidgetMessage('sticker', {
+      type: 'CROSS_SCREEN_DRAG_PREVIEW',
+      preview: null,
+    });
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_INSTANCES',
+      instances: updatedInstances,
+    });
 
     return {
       ...previousState,
       isDragging: false,
       draggingInstanceId: null,
+      crossScreenPreview: null,
       instances: updatedInstances,
+    };
+  }
+
+  if (event.type === 'CROSS_SCREEN_DRAG_PREVIEW') {
+    return {
+      ...previousState,
+      crossScreenPreview: event.preview || null,
     };
   }
 
@@ -707,24 +558,35 @@ export const updateState = (event, previousState) => {
     };
   }
 
+  if (event.type === 'DISPLAY_TOPOLOGY_CHANGED') {
+    const updated = (previousState.instances || []).map((inst) => ({
+      ...inst,
+      targetScreen: resolveActiveScreen(inst.targetScreen || 'screen_1'),
+    }));
+    saveInstances(updated);
+    return {
+      ...previousState,
+      instances: updated,
+      topologyTick: Date.now(),
+    };
+  }
+
   if (event.type === 'COLLAPSE_TO_SINGLE_SCREEN') {
+    const primaryScreen = event.screenId || resolveActiveScreen('screen_0');
     let changed = false;
     const updated = (previousState.instances || []).map((inst) => {
-      if (inst.targetScreen && inst.targetScreen !== 'screen_0') {
+      if (inst.targetScreen && inst.targetScreen !== primaryScreen) {
         changed = true;
-        return { ...inst, targetScreen: 'screen_0' };
+        return { ...inst, targetScreen: primaryScreen };
       }
       return inst;
     });
     if (changed) {
       saveInstances(updated);
-      if (syncChannel) {
-        syncChannel.postMessage({
-          widget: 'sticker',
-          type: 'SYNC_INSTANCES',
-          instances: updated,
-        });
-      }
+      broadcastWidgetMessage('sticker', {
+        type: 'SYNC_INSTANCES',
+        instances: updated,
+      });
       return {
         ...previousState,
         instances: updated,
@@ -735,7 +597,7 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'MOVE_TO_SCREEN') {
     const targetId = event.instanceId;
-    const targetScreen = event.screenId || 'screen_1';
+    const targetScreen = resolveActiveScreen(event.screenId || 'screen_1');
     const updated = (previousState.instances || []).map((inst) => {
       if (inst.id === targetId) {
         return { ...inst, targetScreen, x: SNAP_MARGIN_X, y: SNAP_MARGIN_TOP };
@@ -743,13 +605,10 @@ export const updateState = (event, previousState) => {
       return inst;
     });
     saveInstances(updated);
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'sticker',
-        type: 'SYNC_INSTANCES',
-        instances: updated,
-      });
-    }
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_INSTANCES',
+      instances: updated,
+    });
     return {
       ...previousState,
       instances: updated,
@@ -757,18 +616,15 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'HIDE_PLUS_ON_SCREEN') {
-    const sid = event.screenId || getScreenId();
+    const sid = resolveActiveScreen(event.screenId || getScreenId());
     const current = previousState.hiddenPlusScreens || [];
     if (!current.includes(sid)) {
       const updated = [...current, sid];
       saveHiddenPlusScreens(updated);
-      if (syncChannel) {
-        syncChannel.postMessage({
-          widget: 'sticker',
-          type: 'SYNC_HIDDEN_PLUS',
-          hiddenPlusScreens: updated,
-        });
-      }
+      broadcastWidgetMessage('sticker', {
+        type: 'SYNC_HIDDEN_PLUS',
+        hiddenPlusScreens: updated,
+      });
       return {
         ...previousState,
         hiddenPlusScreens: updated,
@@ -778,7 +634,7 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'TOGGLE_SHOW_PLUS') {
-    const sid = event.screenId || getScreenId();
+    const sid = resolveActiveScreen(event.screenId || getScreenId());
     const current = previousState.hiddenPlusScreens || [];
     let updated;
     if (current.includes(sid)) {
@@ -787,13 +643,10 @@ export const updateState = (event, previousState) => {
       updated = [...current, sid];
     }
     saveHiddenPlusScreens(updated);
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'sticker',
-        type: 'SYNC_HIDDEN_PLUS',
-        hiddenPlusScreens: updated,
-      });
-    }
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_HIDDEN_PLUS',
+      hiddenPlusScreens: updated,
+    });
     return {
       ...previousState,
       hiddenPlusScreens: updated,
@@ -825,8 +678,8 @@ export const updateState = (event, previousState) => {
       }
     }
     const curScreenId = getScreenId();
-    let isBlankPlaceholder = Boolean(targetId && targetId.startsWith('blank_'));
-    let hasTarget = (previousState.instances || []).some(i => i.id === targetId);
+    const isBlankPlaceholder = Boolean(targetId && targetId.startsWith('blank_'));
+    const hasTarget = (previousState.instances || []).some((i) => i.id === targetId);
 
     let updatedInstances;
     let effectiveTargetId = targetId;
@@ -835,7 +688,7 @@ export const updateState = (event, previousState) => {
       effectiveTargetId = `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
       const newInst = {
         id: effectiveTargetId,
-        targetScreen: curScreenId,
+        targetScreen: resolveActiveScreen(curScreenId),
         sticker: event.sticker,
         x: SNAP_MARGIN_X,
         y: SNAP_MARGIN_TOP,
@@ -854,7 +707,7 @@ export const updateState = (event, previousState) => {
         if (inst.id === targetId || (!targetId && inst.id === (previousState.instances?.[0]?.id || 'default'))) {
           return {
             ...inst,
-            targetScreen: inst.targetScreen || curScreenId,
+            targetScreen: resolveActiveScreen(inst.targetScreen || curScreenId),
             sticker: event.sticker,
             isPaused: false,
             currentFrame: 0,
@@ -868,13 +721,10 @@ export const updateState = (event, previousState) => {
 
     saveInstances(updatedInstances);
 
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'sticker',
-        type: 'SYNC_INSTANCES',
-        instances: updatedInstances,
-      });
-    }
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_INSTANCES',
+      instances: updatedInstances,
+    });
 
     if (!meta) {
       loadStickerMeta(event.sticker, (loadedMeta) => {
@@ -906,11 +756,12 @@ export const updateState = (event, previousState) => {
   }
 
   if (event.type === 'RESET_TO_BLANK_PLUS') {
-    Object.keys(animFrameState).forEach(k => delete animFrameState[k]);
-    const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+    Object.keys(animFrameState).forEach((k) => delete animFrameState[k]);
+    const defaultPos = getInitialPosition();
     const blankInstances = [{
       id: 'default',
       sticker: null,
+      targetScreen: resolveActiveScreen(getScreenId()),
       x: defaultPos.x,
       y: defaultPos.y,
       scale: 1.0,
@@ -944,6 +795,10 @@ export const updateState = (event, previousState) => {
       return inst;
     });
     saveInstances(updatedInstances);
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_INSTANCES',
+      instances: updatedInstances,
+    });
     return {
       ...previousState,
       instances: updatedInstances,
@@ -975,6 +830,10 @@ export const updateState = (event, previousState) => {
       return inst;
     });
     saveInstances(updatedInstances);
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_INSTANCES',
+      instances: updatedInstances,
+    });
     return {
       ...previousState,
       instances: updatedInstances,
@@ -1175,7 +1034,7 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'ORDER_FRONT' || event.type === 'ORDER_FORWARD' || event.type === 'ORDER_BACKWARD' || event.type === 'ORDER_BACK') {
     const targetId = event.instanceId;
-    let updatedInstances = [...(previousState.instances || [])];
+    const updatedInstances = [...(previousState.instances || [])];
     const idx = updatedInstances.findIndex((i) => i.id === targetId);
 
     if (idx !== -1) {
@@ -1237,18 +1096,11 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'ADD_STICKER_INSTANCE') {
     const curScreenId = getScreenId();
-    const targetScreen = event.targetScreen;
-    const targetRes = event.targetResolution;
-    const targetNum = event.targetScreenNum ? `screen_${event.targetScreenNum}` : null;
+    const resolvedTarget = resolveActiveScreen(
+      event.targetScreen || (event.targetScreenNum ? `screen_${event.targetScreenNum}` : null) || event.targetResolution || curScreenId
+    );
 
-    // Check if this screen is the target
-    const isTarget = !targetScreen || 
-                     targetScreen === 'all' || 
-                     curScreenId === targetScreen || 
-                     (targetNum && curScreenId === targetNum) || 
-                     (targetRes && curScreenId === targetRes);
-
-    if (!isTarget) {
+    if (!isScreenActive(curScreenId, resolvedTarget)) {
       return previousState;
     }
 
@@ -1257,15 +1109,15 @@ export const updateState = (event, previousState) => {
     }
 
     const current = previousState.instances || [];
-    const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+    const defaultPos = getInitialPosition();
 
     let updatedInstances;
     let newInstId = 'default';
     if (current.length === 1 && !current[0].sticker) {
-      // Replace the blank placeholder with the new sticker at top-left
       newInstId = current[0].id || 'default';
       updatedInstances = [{
         ...current[0],
+        targetScreen: resolvedTarget,
         sticker: event.sticker,
         x: defaultPos.x,
         y: defaultPos.y,
@@ -1281,7 +1133,7 @@ export const updateState = (event, previousState) => {
     } else {
       let posX = defaultPos.x;
       let posY = defaultPos.y;
-      const exactMatch = current.some(i => Math.abs((i.x ?? 0) - posX) < 15 && Math.abs((i.y ?? 0) - posY) < 15);
+      const exactMatch = current.some((i) => Math.abs((i.x ?? 0) - posX) < 15 && Math.abs((i.y ?? 0) - posY) < 15);
       if (exactMatch) {
         posX += 30;
         posY += 30;
@@ -1290,7 +1142,7 @@ export const updateState = (event, previousState) => {
       newInstId = `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
       const newInst = {
         id: newInstId,
-        targetScreen: targetScreen || curScreenId,
+        targetScreen: resolvedTarget,
         sticker: event.sticker,
         x: posX,
         y: posY,
@@ -1307,13 +1159,10 @@ export const updateState = (event, previousState) => {
     }
 
     saveInstances(updatedInstances);
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'sticker',
-        type: 'SYNC_INSTANCES',
-        instances: updatedInstances,
-      });
-    }
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_INSTANCES',
+      instances: updatedInstances,
+    });
 
     loadStickerMeta(event.sticker, (loadedMeta) => {
       if (loadedMeta && loadedMeta.width && loadedMeta.height) {
@@ -1352,20 +1201,17 @@ export const updateState = (event, previousState) => {
     const newInst = {
       ...target,
       id: `inst_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
-      targetScreen: target.targetScreen || curScreenId,
+      targetScreen: resolveActiveScreen(target.targetScreen || curScreenId),
       x: (target.x ?? 100) + 30,
       y: (target.y ?? 100) + 30,
       sticker: target.sticker || null,
     };
     const updatedInstances = [...current, newInst];
     saveInstances(updatedInstances);
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'sticker',
-        type: 'SYNC_INSTANCES',
-        instances: updatedInstances,
-      });
-    }
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_INSTANCES',
+      instances: updatedInstances,
+    });
     return {
       ...previousState,
       instances: updatedInstances,
@@ -1374,18 +1220,15 @@ export const updateState = (event, previousState) => {
 
   if (event.type === 'REMOVE_WIDGET') {
     if (event.instanceId && event.instanceId.startsWith('blank_')) {
-      const sid = getScreenId();
+      const sid = resolveActiveScreen(getScreenId());
       const current = previousState.hiddenPlusScreens || [];
       if (!current.includes(sid)) {
         const updated = [...current, sid];
         saveHiddenPlusScreens(updated);
-        if (syncChannel) {
-          syncChannel.postMessage({
-            widget: 'sticker',
-            type: 'SYNC_HIDDEN_PLUS',
-            hiddenPlusScreens: updated,
-          });
-        }
+        broadcastWidgetMessage('sticker', {
+          type: 'SYNC_HIDDEN_PLUS',
+          hiddenPlusScreens: updated,
+        });
         return {
           ...previousState,
           hiddenPlusScreens: updated,
@@ -1396,13 +1239,10 @@ export const updateState = (event, previousState) => {
     const current = previousState.instances || [];
     const updatedInstances = current.filter((i) => i.id !== event.instanceId);
     saveInstances(updatedInstances);
-    if (syncChannel) {
-      syncChannel.postMessage({
-        widget: 'sticker',
-        type: 'SYNC_INSTANCES',
-        instances: updatedInstances,
-      });
-    }
+    broadcastWidgetMessage('sticker', {
+      type: 'SYNC_INSTANCES',
+      instances: updatedInstances,
+    });
     return {
       ...previousState,
       instances: updatedInstances,
@@ -1419,101 +1259,52 @@ export const updateState = (event, previousState) => {
   return previousState;
 };
 
-if (typeof window !== 'undefined' && !window.__uebersicht_order_listener_sticker) {
-  window.__uebersicht_order_listener_sticker = true;
-  window.addEventListener('uebersicht:order-changed', () => {
-    if (currentDispatch) {
-      currentDispatch({ type: 'ORDER_CHANGED' });
-    }
-  });
-}
-
-if (typeof window !== 'undefined' && !window.__uebersicht_sticker_sync_listener) {
-  window.__uebersicht_sticker_sync_listener = true;
-
-  if (syncChannel) {
-    syncChannel.addEventListener('message', (event) => {
-      const data = event.data;
-      if (data && data.widget === 'sticker' && currentDispatch) {
-        if (data.type === 'SYNC_INSTANCES') {
-          currentDispatch({
-            type: 'SYNC_INSTANCES',
-            instances: data.instances,
-          });
-        } else if (data.type === 'SYNC_HIDDEN_PLUS') {
-          currentDispatch({
-            type: 'SYNC_HIDDEN_PLUS',
-            hiddenPlusScreens: data.hiddenPlusScreens,
-          });
-        }
-      }
-    });
-  }
-
-  window.addEventListener('storage', (event) => {
-    if ((event.key === STORAGE_INSTANCES_KEY || event.key === 'sticker_widget_instances') && event.newValue && currentDispatch) {
+initWidgetDesktopSync({
+  widgetId: 'sticker',
+  helperPaths: [
+    '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper',
+    './sticker.widget/menu_helper',
+  ],
+  getDispatch: () => currentDispatch,
+  storageKeys: [STORAGE_INSTANCES_KEY, STORAGE_HIDDEN_PLUS_KEY],
+  onStorageEvent: (event, dispatch) => {
+    if ((event.key === STORAGE_INSTANCES_KEY || event.key === 'sticker_widget_instances') && event.newValue) {
       try {
         const parsed = JSON.parse(event.newValue);
         if (Array.isArray(parsed)) {
-          currentDispatch({
-            type: 'SYNC_INSTANCES',
-            instances: parsed,
-          });
+          dispatch({ type: 'SYNC_INSTANCES', instances: parsed });
         }
       } catch (e) {}
-    } else if (event.key === STORAGE_HIDDEN_PLUS_KEY && event.newValue && currentDispatch) {
+    } else if (event.key === STORAGE_HIDDEN_PLUS_KEY && event.newValue) {
       try {
         const parsed = JSON.parse(event.newValue);
         if (Array.isArray(parsed)) {
-          currentDispatch({
-            type: 'SYNC_HIDDEN_PLUS',
-            hiddenPlusScreens: parsed,
-          });
+          dispatch({ type: 'SYNC_HIDDEN_PLUS', hiddenPlusScreens: parsed });
         }
       } catch (e) {}
     }
-  });
-
-  const checkScreens = () => {
-    const helperPath = '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper';
-    const fallbackPath = './sticker.widget/menu_helper';
-    run(`"${helperPath}" --screens 2>/dev/null || "${fallbackPath}" --screens 2>/dev/null`, (err, out) => {
-      if (err || !out) return;
-      try {
-        const screens = JSON.parse(out.trim());
-        if (Array.isArray(screens) && screens.length === 1 && currentDispatch) {
-          currentDispatch({ type: 'COLLAPSE_TO_SINGLE_SCREEN' });
-        }
-      } catch (e) {}
-    });
-  };
-
-  window.addEventListener('resize', checkScreens);
-  setTimeout(checkScreens, 1500);
-}
+  },
+});
 
 export const render = (state, dispatch) => {
   const currentState = state || initialState;
   const {
-    opacity = 1.0,
-    shadow = true,
     enableSnapping = true,
-    audioSync = false,
   } = currentState;
 
   currentDispatch = dispatch;
   currentWidgetState = currentState;
 
-  // Ensure sprite sheet animation loop is running
   ensureAnimLoopRunning();
 
   const currentScreenId = getScreenId();
+  const preview = currentState.crossScreenPreview;
   const allInstances = (currentState && currentState.instances && currentState.instances.length > 0)
     ? currentState.instances
     : getInitialInstances();
 
   const screenInstances = allInstances.filter((inst) => {
-    const s = inst.targetScreen || 'screen_3';
+    const s = inst.targetScreen || 'screen_1';
     return isScreenActive(currentScreenId, s);
   });
 
@@ -1521,6 +1312,28 @@ export const render = (state, dispatch) => {
   const isPlusHidden = hiddenPlusScreens.some((s) => isScreenActive(currentScreenId, s));
 
   if (screenInstances.length === 0 && isPlusHidden) {
+    if (preview && preview.targetScreen === currentScreenId) {
+      return (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            transform: `translate3d(${Math.round(preview.x)}px, ${Math.round(preview.y)}px, 0)`,
+            width: `${preview.w}px`,
+            height: `${preview.h}px`,
+            borderRadius: '18px',
+            border: '2px dashed rgba(255, 255, 255, 0.5)',
+            background: 'rgba(28, 27, 25, 0.45)',
+            backdropFilter: 'blur(16px)',
+            WebkitBackdropFilter: 'blur(16px)',
+            boxShadow: '0 12px 32px rgba(0, 0, 0, 0.4)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+          }}
+        />
+      );
+    }
     return <div style={{ display: 'none' }} />;
   }
 
@@ -1554,10 +1367,11 @@ export const render = (state, dispatch) => {
 
   if (typeof localStorage !== 'undefined' && localStorage.getItem('sticker_force_blank_once') === 'true') {
     localStorage.removeItem('sticker_force_blank_once');
-    const defaultPos = getInitialPosition(BLANK_SQUARE_SIZE, BLANK_SQUARE_SIZE);
+    const defaultPos = getInitialPosition();
     instances = [{
       id: 'default',
       sticker: null,
+      targetScreen: resolveActiveScreen(currentScreenId),
       x: defaultPos.x,
       y: defaultPos.y,
       scale: 1.0,
@@ -1574,8 +1388,6 @@ export const render = (state, dispatch) => {
       }, 0);
     }
   }
-
-  debugLog(`RENDER: instances=${instances.length} stickers=${instances.map(i => `${i.sticker || 'blank'}@(${i.x},${i.y})`).join(',')}`);
 
   const openStickerManagerHelper = (instId, currentSticker) => {
     const payload = JSON.stringify({
@@ -1600,8 +1412,8 @@ export const render = (state, dispatch) => {
           const st = res.sticker || currentSticker;
           if (st) {
             const filename = st.split('/').pop();
-            const baseName = filename.replace(/\.[^/.]+$/, "");
-            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
+            const baseName = filename.replace(/\.[^/.]+$/, '');
+            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "$HOME/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
             run(deleteCmd);
           }
           dispatch({
@@ -1644,13 +1456,9 @@ export const render = (state, dispatch) => {
   };
 
   const handlePlusClick = (instanceId, e) => {
-    debugLog(`handlePlusClick: instanceId=${instanceId}`);
     if (e && e.stopPropagation) e.stopPropagation();
     const now = Date.now();
-    if (now - lastPlusClickTimestamp < 400) {
-      debugLog('handlePlusClick: debounced');
-      return;
-    }
+    if (now - lastPlusClickTimestamp < 400) return;
     lastPlusClickTimestamp = now;
 
     const payload = JSON.stringify({
@@ -1659,9 +1467,7 @@ export const render = (state, dispatch) => {
     });
     const cmd = getHelperCmd(payload);
 
-    debugLog(`handlePlusClick: running cmd`);
     run(cmd, (err, output) => {
-      debugLog(`handlePlusClick: callback err=${err} output=${output ? output.trim() : 'NONE'}`);
       if (err || !output) return;
       try {
         const res = JSON.parse(output.trim());
@@ -1678,8 +1484,8 @@ export const render = (state, dispatch) => {
           const st = res.sticker;
           if (st) {
             const filename = st.split('/').pop();
-            const baseName = filename.replace(/\.[^/.]+$/, "");
-            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
+            const baseName = filename.replace(/\.[^/.]+$/, '');
+            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "$HOME/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
             run(deleteCmd);
           }
           dispatch({
@@ -1693,16 +1499,12 @@ export const render = (state, dispatch) => {
   };
 
   const handleContextMenu = (instance, e) => {
-    debugLog(`handleContextMenu: id=${instance.id} sticker=${instance.sticker}`);
     if (e) {
       if (e.preventDefault) e.preventDefault();
       if (e.stopPropagation) e.stopPropagation();
     }
     const now = Date.now();
-    if (now - lastContextMenuTimestamp < 350) {
-      debugLog('handleContextMenu: debounced');
-      return;
-    }
+    if (now - lastContextMenuTimestamp < 350) return;
     lastContextMenuTimestamp = now;
 
     const payload = JSON.stringify({
@@ -1717,7 +1519,7 @@ export const render = (state, dispatch) => {
       opacity: instance.opacity !== undefined ? instance.opacity : 1.0,
       shadow: instance.shadow !== false,
       enableSnapping: enableSnapping !== false,
-      screenId: instance.targetScreen || currentScreenId,
+      screenId: resolveActiveScreen(instance.targetScreen || currentScreenId),
       hiddenPlusScreens: currentState.hiddenPlusScreens || getHiddenPlusScreens(),
       x: Math.round(instance.x ?? 100),
       y: Math.round(instance.y ?? 100),
@@ -1725,9 +1527,7 @@ export const render = (state, dispatch) => {
 
     const cmd = getHelperCmd(payload);
 
-    debugLog(`handleContextMenu: running cmd`);
     run(cmd, (err, output) => {
-      debugLog(`handleContextMenu: callback err=${err} output=${output ? output.trim() : 'NONE'}`);
       if (err || !output) return;
       try {
         const res = JSON.parse(output.trim());
@@ -1748,8 +1548,8 @@ export const render = (state, dispatch) => {
           const st = res.sticker || instance.sticker;
           if (st) {
             const filename = st.split('/').pop();
-            const baseName = filename.replace(/\.[^/.]+$/, "");
-            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "/Users/hhamelin/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
+            const baseName = filename.replace(/\.[^/.]+$/, '');
+            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "$HOME/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
             run(deleteCmd);
           }
           dispatch({
@@ -1825,6 +1625,26 @@ export const render = (state, dispatch) => {
 
   return (
     <div className="sticker-root">
+      {preview && preview.targetScreen === currentScreenId && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            transform: `translate3d(${Math.round(preview.x)}px, ${Math.round(preview.y)}px, 0)`,
+            width: `${preview.w}px`,
+            height: `${preview.h}px`,
+            borderRadius: '18px',
+            border: '2px dashed rgba(255, 255, 255, 0.5)',
+            background: 'rgba(28, 27, 25, 0.45)',
+            backdropFilter: 'blur(16px)',
+            WebkitBackdropFilter: 'blur(16px)',
+            boxShadow: '0 12px 32px rgba(0, 0, 0, 0.4)',
+            pointerEvents: 'none',
+            zIndex: 9999,
+          }}
+        />
+      )}
       {instances.map((instance, index) => {
         const hasSticker = Boolean(instance.sticker);
         const meta = hasSticker ? stickerMetaCache[instance.sticker] : null;
@@ -1884,8 +1704,7 @@ export const render = (state, dispatch) => {
         const isDragging = currentState.isDragging && currentState.draggingInstanceId === instance.id;
 
         const handleMouseDown = (e) => {
-          debugLog(`handleMouseDown: id=${instance.id} button=${e.button} ctrl=${e.ctrlKey}`);
-          if (e.button !== 0) return; // Only primary mouse button
+          if (e.button !== 0) return;
 
           const now = Date.now();
           if (hasSticker) {
@@ -1902,6 +1721,8 @@ export const render = (state, dispatch) => {
           const startX = e.clientX;
           const startY = e.clientY;
           let hasMoved = false;
+          let rafPending = false;
+          let lastBroadcastOverhang = false;
 
           const handleMouseMove = (moveEvent) => {
             const dx = moveEvent.clientX - startX;
@@ -1925,23 +1746,42 @@ export const render = (state, dispatch) => {
 
             if (hasMoved) {
               moveEvent.preventDefault();
-              dispatch({
-                type: 'MOVE_DRAG',
-                clientX: moveEvent.clientX,
-                clientY: moveEvent.clientY,
-                bypassSnap: moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey,
-              });
+              const clientX = moveEvent.clientX;
+              const clientY = moveEvent.clientY;
+              const bypassSnap = moveEvent.metaKey || moveEvent.altKey || moveEvent.shiftKey;
+
+              if (!rafPending) {
+                rafPending = true;
+                requestAnimationFrame(() => {
+                  rafPending = false;
+                  dispatch({
+                    type: 'MOVE_DRAG',
+                    clientX,
+                    clientY,
+                    bypassSnap,
+                  });
+
+                  const rawX = x + (clientX - startX);
+                  const rawY = y + (clientY - startY);
+                  const crossPreview = computeCrossScreenPreview(currentScreenId, rawX, rawY, instCardW, instCardH);
+                  if (crossPreview || lastBroadcastOverhang) {
+                    lastBroadcastOverhang = Boolean(crossPreview);
+                    broadcastWidgetMessage('sticker', {
+                      type: 'CROSS_SCREEN_DRAG_PREVIEW',
+                      preview: crossPreview,
+                    });
+                  }
+                });
+              }
             }
           };
 
           const handleMouseUp = (upEvent) => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
-            debugLog(`handleMouseUp: id=${instance.id} hasMoved=${hasMoved} hasSticker=${hasSticker}`);
             if (hasMoved) {
               dispatch({ type: 'END_DRAG' });
             } else if (!hasSticker) {
-              // Clicked without dragging on blank square: open picker / menu!
               handlePlusClick(instance.id, upEvent || e);
             }
           };
@@ -1951,9 +1791,11 @@ export const render = (state, dispatch) => {
         };
 
         const containerStyle = {
-          position: 'absolute',
-          top: `${y}px`,
-          left: `${x}px`,
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          transform: `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`,
+          willChange: isDragging ? 'transform' : 'auto',
           width: `${instCardW}px`,
           height: `${instCardH}px`,
           boxSizing: 'border-box',
@@ -2000,13 +1842,11 @@ export const render = (state, dispatch) => {
             onContextMenu={(e) => handleContextMenu(instance, e)}
           >
             {!hasSticker ? (
-              /* Blank Square Placeholder with Large Off-White Plus Sign */
               <div
                 className="sticker-blank-square"
                 style={blankSquareStyle}
                 onMouseDown={handleMouseDown}
                 onClick={(clickEvent) => {
-                  debugLog(`blankSquare onClick: hasSticker=${hasSticker}`);
                   if (!hasSticker) {
                     handlePlusClick(instance.id, clickEvent);
                   }
@@ -2034,7 +1874,6 @@ export const render = (state, dispatch) => {
                 </svg>
               </div>
             ) : (
-              /* Active Sticker Box */
               <div
                 id={`sticker-interactive-${instance.id}`}
                 style={stickerStyle}
