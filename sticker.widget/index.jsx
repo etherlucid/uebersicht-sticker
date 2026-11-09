@@ -10,6 +10,7 @@ import {
   resolveDragEndAcrossScreens,
   broadcastWidgetMessage,
   initWidgetDesktopSync,
+  openWidgetContextMenu,
 } from './lib/desktop.js';
 
 export const refreshFrequency = false;
@@ -1495,9 +1496,9 @@ export const render = (state, dispatch) => {
     }
   }
 
-  const openStickerManagerHelper = (instId, currentSticker) => {
+  const openStickerManagerHelper = (instId, currentSticker, mode = 'MANAGER') => {
     const payload = JSON.stringify({
-      mode: 'MANAGER',
+      mode,
       instanceId: instId,
       currentSticker: currentSticker || null,
     });
@@ -1573,34 +1574,32 @@ export const render = (state, dispatch) => {
     });
     const cmd = getHelperCmd(payload);
 
-    run(cmd, (err, output) => {
-      if (err || !output) return;
-      try {
-        const res = JSON.parse(output.trim());
-        if (!res || !res.action) return;
-        if (res.action === 'SET_STICKER' && res.sticker) {
-          dispatch({
-            type: 'SET_STICKER',
-            instanceId: res.instanceId || instanceId,
-            sticker: res.sticker,
-          });
-        } else if (res.action === 'OPEN_MANAGER') {
-          openStickerManagerHelper(res.instanceId || instanceId, null);
-        } else if (res.action === 'CLEAR_STICKER') {
-          const st = res.sticker;
-          if (st) {
-            const filename = st.split('/').pop();
-            const baseName = filename.replace(/\.[^/.]+$/, '');
-            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "$HOME/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
-            run(deleteCmd);
-          }
-          dispatch({
-            type: 'CLEAR_STICKER',
-            instanceId: res.instanceId || instanceId,
-            sticker: st,
-          });
+    openWidgetContextMenu('sticker', payload, cmd, run, (res) => {
+      if (!res || !res.action) return;
+      if (res.action === 'SET_STICKER' && res.sticker) {
+        dispatch({
+          type: 'SET_STICKER',
+          instanceId: res.instanceId || instanceId,
+          sticker: res.sticker,
+        });
+      } else if (res.action === 'OPEN_MANAGER') {
+        openStickerManagerHelper(res.instanceId || instanceId, null, 'MANAGER');
+      } else if (res.action === 'QUICK_CREATE_NEW') {
+        openStickerManagerHelper(res.instanceId || instanceId, null, 'QUICK_CREATE_NEW');
+      } else if (res.action === 'CLEAR_STICKER') {
+        const st = res.sticker;
+        if (st) {
+          const filename = st.split('/').pop();
+          const baseName = filename.replace(/\.[^/.]+$/, '');
+          const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "$HOME/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
+          run(deleteCmd);
         }
-      } catch (parseErr) {}
+        dispatch({
+          type: 'CLEAR_STICKER',
+          instanceId: res.instanceId || instanceId,
+          sticker: st,
+        });
+      }
     });
   };
 
@@ -1633,88 +1632,86 @@ export const render = (state, dispatch) => {
 
     const cmd = getHelperCmd(payload);
 
-    run(cmd, (err, output) => {
-      if (err || !output) return;
-      try {
-        const res = JSON.parse(output.trim());
-        if (!res || !res.action) return;
+    openWidgetContextMenu('sticker', payload, cmd, run, (res) => {
+      if (!res || !res.action) return;
 
-        if (res.action === 'SET_STICKER') {
-          dispatch({
-            type: 'SET_STICKER',
-            instanceId: res.instanceId || instance.id,
-            sticker: res.sticker,
-          });
-        } else if (res.action === 'CLEAR_FROM_WIDGET') {
-          dispatch({
-            type: 'CLEAR_FROM_WIDGET',
-            instanceId: res.instanceId || instance.id,
-          });
-        } else if (res.action === 'CLEAR_STICKER') {
-          const st = res.sticker || instance.sticker;
-          if (st) {
-            const filename = st.split('/').pop();
-            const baseName = filename.replace(/\.[^/.]+$/, '');
-            const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "$HOME/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
-            run(deleteCmd);
-          }
-          dispatch({
-            type: 'CLEAR_STICKER',
-            instanceId: res.instanceId || instance.id,
-            sticker: st,
-          });
-        } else if (res.action === 'OPEN_MANAGER') {
-          openStickerManagerHelper(res.instanceId || instance.id, instance.sticker);
-        } else if (res.action === 'OPEN_STUDIO') {
-          openStickerStudioHelper(res.instanceId || instance.id, instance.sticker);
-        } else if (res.action === 'SET_SCALE') {
-          dispatch({
-            type: 'SET_SCALE',
-            instanceId: res.instanceId || instance.id,
-            scale: res.scale,
-          });
-        } else if (res.action === 'SET_FLIP') {
-          dispatch({
-            type: 'SET_FLIP',
-            instanceId: res.instanceId || instance.id,
-            flipped: res.flipped,
-          });
-        } else if (res.action === 'TOGGLE_PAUSE') {
-          const targetInstId = res.instanceId || instance.id;
-          dispatch({ type: 'TOGGLE_PAUSE', instanceId: targetInstId });
-        } else if (res.action === 'TOGGLE_AUDIO_SYNC') {
-          dispatch({ type: 'TOGGLE_AUDIO_SYNC', instanceId: res.instanceId || instance.id });
-        } else if (res.action === 'SET_AUDIO_SENSITIVITY') {
-          dispatch({
-            type: 'SET_AUDIO_SENSITIVITY',
-            instanceId: res.instanceId || instance.id,
-            audioSensitivity: res.audioSensitivity,
-          });
-        } else if (res.action === 'SET_OPACITY') {
-          dispatch({ type: 'SET_OPACITY', instanceId: res.instanceId || instance.id, opacity: res.opacity });
-        } else if (res.action === 'TOGGLE_SHADOW') {
-          dispatch({ type: 'TOGGLE_SHADOW', instanceId: res.instanceId || instance.id });
-        } else if (res.action === 'TOGGLE_SNAPPING') {
-          dispatch({ type: 'TOGGLE_SNAPPING' });
-        } else if (res.action === 'RESET_POSITION') {
-          dispatch({ type: 'RESET_POSITION', instanceId: res.instanceId || instance.id });
-        } else if (res.action === 'MOVE_TO_SCREEN') {
-          dispatch({ type: 'MOVE_TO_SCREEN', instanceId: res.instanceId || instance.id, screenId: res.screenId });
-        } else if (res.action === 'HIDE_PLUS_ON_SCREEN') {
-          dispatch({ type: 'HIDE_PLUS_ON_SCREEN', screenId: res.screenId });
-        } else if (res.action === 'TOGGLE_SHOW_PLUS') {
-          dispatch({ type: 'TOGGLE_SHOW_PLUS', screenId: res.screenId });
-        } else if (res.action === 'RELOAD_WIDGET') {
-          const wid = res.widgetId || 'sticker-widget-index-jsx';
-          run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
-        } else if (res.action === 'REMOVE_WIDGET') {
-          dispatch({ type: 'REMOVE_WIDGET', instanceId: res.instanceId || instance.id, widgetId: res.widgetId || 'sticker-widget-index-jsx' });
-        } else if (res.action === 'DUPLICATE_WIDGET') {
-          dispatch({ type: 'DUPLICATE_WIDGET', instanceId: res.instanceId || instance.id });
-        } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
-          dispatch({ type: res.action, instanceId: res.instanceId || instance.id });
+      if (res.action === 'SET_STICKER') {
+        dispatch({
+          type: 'SET_STICKER',
+          instanceId: res.instanceId || instance.id,
+          sticker: res.sticker,
+        });
+      } else if (res.action === 'CLEAR_FROM_WIDGET') {
+        dispatch({
+          type: 'CLEAR_FROM_WIDGET',
+          instanceId: res.instanceId || instance.id,
+        });
+      } else if (res.action === 'CLEAR_STICKER') {
+        const st = res.sticker || instance.sticker;
+        if (st) {
+          const filename = st.split('/').pop();
+          const baseName = filename.replace(/\.[^/.]+$/, '');
+          const deleteCmd = `rm -f "$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/stickers/${baseName}"* "$HOME/Documents/antigravity/uebersicht-sticker/sticker.widget/stickers/${baseName}"* 2>/dev/null`;
+          run(deleteCmd);
         }
-      } catch (parseErr) {}
+        dispatch({
+          type: 'CLEAR_STICKER',
+          instanceId: res.instanceId || instance.id,
+          sticker: st,
+        });
+      } else if (res.action === 'OPEN_MANAGER') {
+        openStickerManagerHelper(res.instanceId || instance.id, instance.sticker, 'MANAGER');
+      } else if (res.action === 'QUICK_CREATE_NEW') {
+        openStickerManagerHelper(res.instanceId || instance.id, instance.sticker, 'QUICK_CREATE_NEW');
+      } else if (res.action === 'OPEN_STUDIO') {
+        openStickerStudioHelper(res.instanceId || instance.id, instance.sticker);
+      } else if (res.action === 'SET_SCALE') {
+        dispatch({
+          type: 'SET_SCALE',
+          instanceId: res.instanceId || instance.id,
+          scale: res.scale,
+        });
+      } else if (res.action === 'SET_FLIP') {
+        dispatch({
+          type: 'SET_FLIP',
+          instanceId: res.instanceId || instance.id,
+          flipped: res.flipped,
+        });
+      } else if (res.action === 'TOGGLE_PAUSE') {
+        const targetInstId = res.instanceId || instance.id;
+        dispatch({ type: 'TOGGLE_PAUSE', instanceId: targetInstId });
+      } else if (res.action === 'TOGGLE_AUDIO_SYNC') {
+        dispatch({ type: 'TOGGLE_AUDIO_SYNC', instanceId: res.instanceId || instance.id });
+      } else if (res.action === 'SET_AUDIO_SENSITIVITY') {
+        dispatch({
+          type: 'SET_AUDIO_SENSITIVITY',
+          instanceId: res.instanceId || instance.id,
+          audioSensitivity: res.audioSensitivity,
+        });
+      } else if (res.action === 'SET_OPACITY') {
+        dispatch({ type: 'SET_OPACITY', instanceId: res.instanceId || instance.id, opacity: res.opacity });
+      } else if (res.action === 'TOGGLE_SHADOW') {
+        dispatch({ type: 'TOGGLE_SHADOW', instanceId: res.instanceId || instance.id });
+      } else if (res.action === 'TOGGLE_SNAPPING') {
+        dispatch({ type: 'TOGGLE_SNAPPING' });
+      } else if (res.action === 'RESET_POSITION') {
+        dispatch({ type: 'RESET_POSITION', instanceId: res.instanceId || instance.id });
+      } else if (res.action === 'MOVE_TO_SCREEN') {
+        dispatch({ type: 'MOVE_TO_SCREEN', instanceId: res.instanceId || instance.id, screenId: res.screenId });
+      } else if (res.action === 'HIDE_PLUS_ON_SCREEN') {
+        dispatch({ type: 'HIDE_PLUS_ON_SCREEN', screenId: res.screenId });
+      } else if (res.action === 'TOGGLE_SHOW_PLUS') {
+        dispatch({ type: 'TOGGLE_SHOW_PLUS', screenId: res.screenId });
+      } else if (res.action === 'RELOAD_WIDGET') {
+        const wid = res.widgetId || 'sticker-widget-index-jsx';
+        run(`osascript -e 'tell application id "tracesOf.Uebersicht" to reload widget id "${wid}"' 2>/dev/null || osascript -e 'tell application id "tracesOf.Uebersicht" to refresh'`);
+      } else if (res.action === 'REMOVE_WIDGET') {
+        dispatch({ type: 'REMOVE_WIDGET', instanceId: res.instanceId || instance.id, widgetId: res.widgetId || 'sticker-widget-index-jsx' });
+      } else if (res.action === 'DUPLICATE_WIDGET') {
+        dispatch({ type: 'DUPLICATE_WIDGET', instanceId: res.instanceId || instance.id });
+      } else if (res.action === 'ORDER_FRONT' || res.action === 'ORDER_FORWARD' || res.action === 'ORDER_BACKWARD' || res.action === 'ORDER_BACK') {
+        dispatch({ type: res.action, instanceId: res.instanceId || instance.id });
+      }
     });
   };
 

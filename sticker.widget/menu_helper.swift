@@ -1994,61 +1994,32 @@ func logHelper(_ msg: String) {
     }
 }
 
-@discardableResult
-func popUpMenuAtMouse(menu: NSMenu) -> Bool {
-    let menuPidFile = "/tmp/uebersicht_active_menu.pid"
-    let menuDismissFile = "/tmp/uebersicht_menu_dismissed.ts"
-    let nowTs = Date().timeIntervalSince1970
+let daemonPort: UInt16 = 41424
+let daemonPidFile = "/tmp/uebersicht_menu_daemon_sticker.pid"
+let menuPidFile = "/tmp/uebersicht_active_menu.pid"
+let menuDismissFile = "/tmp/uebersicht_menu_dismissed.ts"
 
-    if let pidStr = try? String(contentsOfFile: menuPidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-       let oldPid = Int32(pidStr), oldPid > 0, oldPid != getpid() {
-        if kill(oldPid, 0) == 0 {
-            kill(oldPid, SIGTERM)
-            try? FileManager.default.removeItem(atPath: menuPidFile)
-            try? String(format: "%.4f", nowTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
-            exit(0)
+var activeMenu: NSMenu? = nil
+var isMenuOpen = false
+var lastDismissTs: Double = 0
+
+func ensureDaemonRunning(helperPath: String) {
+    if let pidStr = try? String(contentsOfFile: daemonPidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+       let pid = Int32(pidStr), pid > 0 {
+        if kill(pid, 0) == 0 {
+            return
         }
     }
-
-    if let tsStr = try? String(contentsOfFile: menuDismissFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-       let lastDismiss = Double(tsStr) {
-        try? FileManager.default.removeItem(atPath: menuDismissFile)
-        if (nowTs - lastDismiss) >= 0 && (nowTs - lastDismiss) < 0.25 {
-            exit(0)
-        }
-    }
-
-    try? "\(getpid())".write(toFile: menuPidFile, atomically: true, encoding: .utf8)
-    NSApp.activate(ignoringOtherApps: true)
-    let mouseLoc = NSEvent.mouseLocation
-    logHelper("popUpMenuAtMouse: mouseLoc=\(mouseLoc)")
-    let result = menu.popUp(positioning: nil, at: mouseLoc, in: nil)
-    try? FileManager.default.removeItem(atPath: menuPidFile)
-    if !result && delegate.outputAction == nil {
-        let endTs = Date().timeIntervalSince1970
-        try? String(format: "%.4f", endTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
-    } else {
-        try? FileManager.default.removeItem(atPath: menuDismissFile)
-    }
-    logHelper("popUpMenuAtMouse result=\(result), outputAction=\(delegate.outputAction ?? "nil")")
-    return result
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: helperPath)
+    task.arguments = ["--daemon"]
+    task.standardInput = FileHandle.nullDevice
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    try? task.run()
 }
 
-// MARK: - Main Execution
-
-var state = MenuState()
-if CommandLine.arguments.count > 1 {
-    let jsonStr = CommandLine.arguments[1]
-    if let data = jsonStr.data(using: .utf8) {
-        state = (try? JSONDecoder().decode(MenuState.self, from: data)) ?? MenuState()
-    }
-} else {
-    // Opened directly with no CLI arguments (e.g. from the macOS Dock or Finder)
-    state.mode = "MANAGER"
-    state.instanceId = "default"
-}
-
-if CommandLine.arguments.contains("--screens") || state.mode == "GET_SCREENS" {
+func getScreensJson() -> String {
     let screens = NSScreen.screens
     var screenInfos: [[String: Any]] = []
     for (i, s) in screens.enumerated() {
@@ -2067,118 +2038,9 @@ if CommandLine.arguments.contains("--screens") || state.mode == "GET_SCREENS" {
     }
     if let data = try? JSONSerialization.data(withJSONObject: screenInfos),
        let json = String(data: data, encoding: .utf8) {
-        print(json)
+        return json
     }
-    exit(0)
-}
-
-ProcessInfo.processInfo.processName = "Übersicht"
-let app = NSApplication.shared
-app.delegate = appDelegate
-app.setActivationPolicy(.accessory)
-
-let delegate = MenuDelegate()
-let helperPath = CommandLine.arguments[0]
-var widgetDirURL = URL(fileURLWithPath: helperPath).deletingLastPathComponent()
-if widgetDirURL.path.contains(".app/Contents/MacOS") {
-    widgetDirURL = widgetDirURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-}
-let widgetDir = widgetDirURL.path
-let widgetFolder = widgetDirURL.lastPathComponent
-let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
-
-let mode = state.mode ?? "CONTEXT_MENU"
-let instanceId = state.instanceId ?? "default"
-let localStickers = getLocalStickers(widgetDir: widgetDir)
-
-logHelper("MAIN: mode=\(mode) instanceId=\(instanceId) localStickers=\(localStickers.count)")
-
-if mode == "SYNC_DISPLAYS" || CommandLine.arguments.contains("--sync-displays") {
-    let result = syncWidgetsToTargetDisplay(targetPattern: state.targetName ?? "ASUS")
-    print(result)
-    exit(0)
-}
-
-if mode == "PICK_ONLY" {
-    if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
-        print(result)
-    }
-    exit(0)
-}
-
-if mode == "MANAGER" {
-    if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
-        print(result)
-    }
-    exit(0)
-}
-
-if mode == "STUDIO" {
-    if let curPath = resolveStickerPath(state.currentSticker, widgetDir: widgetDir) {
-        if let result = openStickerCutoutStudio(sourcePath: curPath, widgetDir: widgetDir, instanceId: instanceId) {
-            print(result)
-        }
-    } else if let src = chooseImageFile() {
-        if let result = openStickerCutoutStudio(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId) {
-            print(result)
-        }
-    }
-    exit(0)
-}
-
-if mode == "PLUS_CLICK" {
-    // If no local stickers exist yet, directly open Sticker Manager for visual onboarding
-    if localStickers.isEmpty {
-        if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
-            print(result)
-        }
-        exit(0)
-    }
-
-    // Compact popup menu listing "Sticker Library…", local stickers, and "Choose from Finder…"
-    let menu = NSMenu(title: "Select Sticker")
-    menu.autoenablesItems = false
-
-    let managerItem = NSMenuItem(title: "🖼️ Sticker Library…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    managerItem.target = delegate
-    managerItem.representedObject = "{\"action\":\"OPEN_MANAGER\",\"instanceId\":\"\(instanceId)\"}"
-    menu.addItem(managerItem)
-
-    menu.addItem(NSMenuItem.separator())
-
-    for sticker in localStickers {
-        let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-        item.target = delegate
-        item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
-        if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
-            item.state = .on
-        }
-        menu.addItem(item)
-    }
-
-    menu.addItem(NSMenuItem.separator())
-
-    let finderItem = NSMenuItem(title: "Choose from Finder…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    finderItem.target = delegate
-    finderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
-    menu.addItem(finderItem)
-
-    popUpMenuAtMouse(menu: menu)
-
-    if let action = delegate.outputAction {
-        if action.contains("OPEN_MANAGER") {
-            if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
-                print(result)
-            }
-        } else if action.contains("TRIGGER_FINDER_PICKER") {
-            if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
-                print(result)
-            }
-        } else {
-            print(action)
-        }
-    }
-    exit(0)
+    return "[]"
 }
 
 func promptForCustomSensitivity(current: Int) -> Int? {
@@ -2202,330 +2064,671 @@ func promptForCustomSensitivity(current: Int) -> Int? {
     return nil
 }
 
-// CONTEXT_MENU mode
-let menu = NSMenu(title: "Sticker Controls")
-menu.autoenablesItems = false
+@discardableResult
+func popUpMenuAtMouse(menu: NSMenu, delegate: MenuDelegate) -> Bool {
+    let nowTs = Date().timeIntervalSince1970
 
-let hasSticker = state.currentSticker != nil && !(state.currentSticker?.isEmpty ?? true)
-
-// 1. Sticker Management Section
-let managerMenuItem = NSMenuItem(title: "🖼️ Sticker Library…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-managerMenuItem.target = delegate
-managerMenuItem.representedObject = "{\"action\":\"OPEN_MANAGER\",\"instanceId\":\"\(instanceId)\"}"
-menu.addItem(managerMenuItem)
-
-let quickSwitchParent = NSMenuItem(title: "⚡ Quick Switch", action: nil, keyEquivalent: "")
-let quickSwitchMenu = NSMenu(title: "Quick Switch")
-quickSwitchMenu.autoenablesItems = false
-for sticker in localStickers {
-    let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    item.target = delegate
-    item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
-    if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
-        item.state = .on
+    if let pidStr = try? String(contentsOfFile: menuPidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+       let oldPid = Int32(pidStr), oldPid > 0, oldPid != getpid() {
+        if kill(oldPid, 0) == 0 {
+            kill(oldPid, SIGUSR1)
+            try? FileManager.default.removeItem(atPath: menuPidFile)
+            try? String(format: "%.4f", nowTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
+            lastDismissTs = nowTs
+            return false
+        }
     }
-    quickSwitchMenu.addItem(item)
+
+    if (nowTs - lastDismissTs) >= 0 && (nowTs - lastDismissTs) < 0.25 {
+        lastDismissTs = 0
+        try? FileManager.default.removeItem(atPath: menuDismissFile)
+        return false
+    }
+
+    if let tsStr = try? String(contentsOfFile: menuDismissFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+       let fileDismiss = Double(tsStr) {
+        try? FileManager.default.removeItem(atPath: menuDismissFile)
+        if (nowTs - fileDismiss) >= 0 && (nowTs - fileDismiss) < 0.25 {
+            lastDismissTs = 0
+            return false
+        }
+    }
+
+    activeMenu = menu
+    isMenuOpen = true
+    try? "\(getpid())".write(toFile: menuPidFile, atomically: true, encoding: .utf8)
+    NSApp.activate(ignoringOtherApps: true)
+    let mouseLoc = NSEvent.mouseLocation
+    let result = menu.popUp(positioning: nil, at: mouseLoc, in: nil)
+    isMenuOpen = false
+    activeMenu = nil
+    try? FileManager.default.removeItem(atPath: menuPidFile)
+    if !result && delegate.outputAction == nil {
+        let endTs = Date().timeIntervalSince1970
+        lastDismissTs = endTs
+        try? String(format: "%.4f", endTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
+    } else {
+        lastDismissTs = 0
+        try? FileManager.default.removeItem(atPath: menuDismissFile)
+    }
+    return result
 }
-if !localStickers.isEmpty {
-    quickSwitchMenu.addItem(NSMenuItem.separator())
-}
-let createNewItem = NSMenuItem(title: "+ Create New…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-createNewItem.target = delegate
-createNewItem.representedObject = "{\"action\":\"QUICK_CREATE_NEW\",\"instanceId\":\"\(instanceId)\"}"
-quickSwitchMenu.addItem(createNewItem)
 
-quickSwitchParent.submenu = quickSwitchMenu
-menu.addItem(quickSwitchParent)
+func executeStickerMenuOnMain(state: MenuState, widgetDir: String, widgetId: String, allowModalWindows: Bool) -> String {
+    let mode = state.mode ?? "CONTEXT_MENU"
+    let instanceId = state.instanceId ?? "default"
+    let localStickers = getLocalStickers(widgetDir: widgetDir)
+    let delegate = MenuDelegate()
 
-if hasSticker {
-    let clearFromWidget = NSMenuItem(title: "⭕ Clear from Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    clearFromWidget.target = delegate
-    clearFromWidget.representedObject = "{\"action\":\"CLEAR_FROM_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
-    menu.addItem(clearFromWidget)
-}
+    if mode == "PLUS_CLICK" {
+        if localStickers.isEmpty {
+            if allowModalWindows {
+                return openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) ?? ""
+            }
+            return "{\"action\":\"OPEN_MANAGER\",\"instanceId\":\"\(instanceId)\"}"
+        }
 
-// 2. Sticker Display Controls (if has sticker)
-if hasSticker {
-    menu.addItem(NSMenuItem.separator())
+        let menu = NSMenu(title: "Select Sticker")
+        menu.autoenablesItems = false
 
-    // Size Submenu
-    let currentScale = state.scale ?? 1.0
-    let sizeParent = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
-    let sizeMenu = NSMenu(title: "Size")
-    sizeMenu.autoenablesItems = false
-    let sizeOptions: [(String, Double)] = [
-        ("50%", 0.5),
-        ("75%", 0.75),
-        ("100%", 1.0),
-        ("125%", 1.25),
-        ("150%", 1.5)
-    ]
-    for (label, val) in sizeOptions {
-        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        let managerItem = NSMenuItem(title: "🖼️ Sticker Library…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        managerItem.target = delegate
+        managerItem.representedObject = "{\"action\":\"OPEN_MANAGER\",\"instanceId\":\"\(instanceId)\"}"
+        menu.addItem(managerItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        for sticker in localStickers {
+            let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
+            if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
+                item.state = .on
+            }
+            menu.addItem(item)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
+        let finderItem = NSMenuItem(title: "Choose from Finder…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        finderItem.target = delegate
+        finderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
+        menu.addItem(finderItem)
+
+        popUpMenuAtMouse(menu: menu, delegate: delegate)
+
+        if let action = delegate.outputAction {
+            if action.contains("OPEN_MANAGER") {
+                if allowModalWindows {
+                    return openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) ?? ""
+                }
+                return action
+            } else if action.contains("TRIGGER_FINDER_PICKER") {
+                return pickAndImport(widgetDir: widgetDir, instanceId: instanceId) ?? ""
+            } else {
+                return action
+            }
+        }
+        return ""
+    }
+
+    let menu = NSMenu(title: "Sticker Controls")
+    menu.autoenablesItems = false
+
+    let hasSticker = state.currentSticker != nil && !(state.currentSticker?.isEmpty ?? true)
+
+    let managerMenuItem = NSMenuItem(title: "🖼️ Sticker Library…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    managerMenuItem.target = delegate
+    managerMenuItem.representedObject = "{\"action\":\"OPEN_MANAGER\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(managerMenuItem)
+
+    let quickSwitchParent = NSMenuItem(title: "⚡ Quick Switch", action: nil, keyEquivalent: "")
+    let quickSwitchMenu = NSMenu(title: "Quick Switch")
+    quickSwitchMenu.autoenablesItems = false
+    for sticker in localStickers {
+        let item = NSMenuItem(title: sticker.title, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
         item.target = delegate
-        item.representedObject = "{\"action\":\"SET_SCALE\",\"instanceId\":\"\(instanceId)\",\"scale\":\(val)}"
-        if abs(currentScale - val) < 0.01 {
+        item.representedObject = "{\"action\":\"SET_STICKER\",\"instanceId\":\"\(instanceId)\",\"sticker\":\"\(sticker.relPath)\",\"name\":\"\(sticker.filename)\"}"
+        if let cur = state.currentSticker, cur.hasSuffix(sticker.filename) {
             item.state = .on
         }
-        sizeMenu.addItem(item)
+        quickSwitchMenu.addItem(item)
     }
-    sizeParent.submenu = sizeMenu
-    menu.addItem(sizeParent)
-
-    // Direction Submenu
-    let isFlipped = state.flipped ?? false
-    let dirParent = NSMenuItem(title: "Facing Direction", action: nil, keyEquivalent: "")
-    let dirMenu = NSMenu(title: "Facing Direction")
-    dirMenu.autoenablesItems = false
-    let leftItem = NSMenuItem(title: "◀ Face Left", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    leftItem.target = delegate
-    leftItem.representedObject = "{\"action\":\"SET_FLIP\",\"instanceId\":\"\(instanceId)\",\"flipped\":true}"
-    if isFlipped { leftItem.state = .on }
-    dirMenu.addItem(leftItem)
-
-    let rightItem = NSMenuItem(title: "Face Right ▶", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    rightItem.target = delegate
-    rightItem.representedObject = "{\"action\":\"SET_FLIP\",\"instanceId\":\"\(instanceId)\",\"flipped\":false}"
-    if !isFlipped { rightItem.state = .on }
-    dirMenu.addItem(rightItem)
-    dirParent.submenu = dirMenu
-    menu.addItem(dirParent)
-
-    // Opacity Submenu
-    let currentOpacity = state.opacity ?? 1.0
-    let opParent = NSMenuItem(title: "Opacity", action: nil, keyEquivalent: "")
-    let opMenu = NSMenu(title: "Opacity")
-    opMenu.autoenablesItems = false
-    let opacityOptions: [(String, Double)] = [
-        ("100%", 1.0),
-        ("80%", 0.8),
-        ("60%", 0.6),
-        ("40%", 0.4)
-    ]
-    for (label, val) in opacityOptions {
-        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-        item.target = delegate
-        item.representedObject = "{\"action\":\"SET_OPACITY\",\"instanceId\":\"\(instanceId)\",\"opacity\":\(val)}"
-        if abs(currentOpacity - val) < 0.01 {
-            item.state = .on
-        }
-        opMenu.addItem(item)
+    if !localStickers.isEmpty {
+        quickSwitchMenu.addItem(NSMenuItem.separator())
     }
-    opParent.submenu = opMenu
-    menu.addItem(opParent)
+    let createNewItem = NSMenuItem(title: "+ Create New…", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    createNewItem.target = delegate
+    createNewItem.representedObject = "{\"action\":\"QUICK_CREATE_NEW\",\"instanceId\":\"\(instanceId)\"}"
+    quickSwitchMenu.addItem(createNewItem)
 
-    menu.addItem(NSMenuItem.separator())
-
-    // Animation Pause / Resume
-    let isPaused = state.isPaused ?? false
-    let animTitle = isPaused ? "▶ Resume Animation" : "⏸ Pause Animation"
-    let animItem = NSMenuItem(title: animTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    animItem.target = delegate
-    animItem.representedObject = "{\"action\":\"TOGGLE_PAUSE\",\"instanceId\":\"\(instanceId)\"}"
-    menu.addItem(animItem)
-
-    // Audio Stream Animation Playback Toggle
-    let hasAudioSync = state.audioSync ?? false
-    let syncItem = NSMenuItem(title: "🎵 Sync with Audio Stream", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    syncItem.target = delegate
-    syncItem.representedObject = "{\"action\":\"TOGGLE_AUDIO_SYNC\",\"instanceId\":\"\(instanceId)\"}"
-    if hasAudioSync { syncItem.state = .on }
-    menu.addItem(syncItem)
-
-    // Audio Sensitivity Submenu
-    let currentSens = state.audioSensitivity ?? 20
-    let sensParent = NSMenuItem(title: "Audio Sensitivity", action: nil, keyEquivalent: "")
-    let sensMenu = NSMenu(title: "Audio Sensitivity")
-    sensMenu.autoenablesItems = false
-    let sensOptions: [(String, Int)] = [
-        ("Very High (5)", 5),
-        ("High (10)", 10),
-        ("Medium (20)", 20),
-        ("Low (35)", 35),
-        ("Very Low (55)", 55)
-    ]
-    for (label, val) in sensOptions {
-        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-        item.target = delegate
-        item.representedObject = "{\"action\":\"SET_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"audioSensitivity\":\(val)}"
-        if currentSens == val {
-            item.state = .on
-        }
-        sensMenu.addItem(item)
-    }
-
-    sensMenu.addItem(NSMenuItem.separator())
-    let isCustom = !sensOptions.contains { $0.1 == currentSens }
-    let customTitle = isCustom ? "Custom (\(currentSens))…" : "Custom…"
-    let customSensItem = NSMenuItem(title: customTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    customSensItem.target = delegate
-    customSensItem.representedObject = "{\"action\":\"CUSTOM_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"current\":\(currentSens)}"
-    if isCustom { customSensItem.state = .on }
-    sensMenu.addItem(customSensItem)
-
-    sensParent.submenu = sensMenu
-    menu.addItem(sensParent)
-}
-
-menu.addItem(NSMenuItem.separator())
-
-// Order Submenu
-let orderParent = NSMenuItem(title: "Order", action: nil, keyEquivalent: "")
-let orderMenu = NSMenu(title: "Order")
-orderMenu.autoenablesItems = false
-let orderOptions: [(String, String)] = [
-    ("Bring to Front", "ORDER_FRONT"),
-    ("Bring Forward", "ORDER_FORWARD"),
-    ("Send Backward", "ORDER_BACKWARD"),
-    ("Send to Back", "ORDER_BACK")
-]
-for (label, act) in orderOptions {
-    let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    item.target = delegate
-    item.representedObject = "{\"action\":\"\(act)\",\"instanceId\":\"\(instanceId)\"}"
-    orderMenu.addItem(item)
-}
-orderParent.submenu = orderMenu
-menu.addItem(orderParent)
-
-if hasSticker {
-    let hasShadow = state.shadow ?? true
-    let shadowItem = NSMenuItem(title: "Ambient Shadow", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-    shadowItem.target = delegate
-    shadowItem.representedObject = "{\"action\":\"TOGGLE_SHADOW\",\"instanceId\":\"\(instanceId)\"}"
-    if hasShadow { shadowItem.state = .on }
-    menu.addItem(shadowItem)
-}
-
-let hasSnapping = state.enableSnapping ?? true
-let snapItem = NSMenuItem(title: "Snap to Edges", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-snapItem.target = delegate
-snapItem.representedObject = "{\"action\":\"TOGGLE_SNAPPING\"}"
-if hasSnapping { snapItem.state = .on }
-menu.addItem(snapItem)
-
-menu.addItem(NSMenuItem.separator())
-
-// Reset Position
-let resetItem = NSMenuItem(title: "Reset Position", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-resetItem.target = delegate
-resetItem.representedObject = "{\"action\":\"RESET_POSITION\",\"instanceId\":\"\(instanceId)\"}"
-menu.addItem(resetItem)
-
-// Display Submenu
-let screens = NSScreen.screens
-if screens.count > 1 {
-    let dispParent = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
-    let dispMenu = NSMenu(title: "Display")
-    dispMenu.autoenablesItems = false
-    let currentScreen = state.screenId ?? ""
-    let hiddenPlusList = state.hiddenPlusScreens ?? []
-    let allScreenIds: [String] = screens.map { s in
-        let num = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
-        return "screen_\(num)"
-    }
-    let hasExactMatch = allScreenIds.contains(currentScreen)
+    quickSwitchParent.submenu = quickSwitchMenu
+    menu.addItem(quickSwitchParent)
 
     if hasSticker {
+        let clearFromWidget = NSMenuItem(title: "⭕ Clear from Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        clearFromWidget.target = delegate
+        clearFromWidget.representedObject = "{\"action\":\"CLEAR_FROM_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
+        menu.addItem(clearFromWidget)
+    }
+
+    if hasSticker {
+        menu.addItem(NSMenuItem.separator())
+
+        let currentScale = state.scale ?? 1.0
+        let sizeParent = NSMenuItem(title: "Size", action: nil, keyEquivalent: "")
+        let sizeMenu = NSMenu(title: "Size")
+        sizeMenu.autoenablesItems = false
+        let sizeOptions: [(String, Double)] = [
+            ("50%", 0.5),
+            ("75%", 0.75),
+            ("100%", 1.0),
+            ("125%", 1.25),
+            ("150%", 1.5)
+        ]
+        for (label, val) in sizeOptions {
+            let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = "{\"action\":\"SET_SCALE\",\"instanceId\":\"\(instanceId)\",\"scale\":\(val)}"
+            if abs(currentScale - val) < 0.01 {
+                item.state = .on
+            }
+            sizeMenu.addItem(item)
+        }
+        sizeParent.submenu = sizeMenu
+        menu.addItem(sizeParent)
+
+        let isFlipped = state.flipped ?? false
+        let dirParent = NSMenuItem(title: "Facing Direction", action: nil, keyEquivalent: "")
+        let dirMenu = NSMenu(title: "Facing Direction")
+        dirMenu.autoenablesItems = false
+        let leftItem = NSMenuItem(title: "◀ Face Left", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        leftItem.target = delegate
+        leftItem.representedObject = "{\"action\":\"SET_FLIP\",\"instanceId\":\"\(instanceId)\",\"flipped\":true}"
+        if isFlipped { leftItem.state = .on }
+        dirMenu.addItem(leftItem)
+
+        let rightItem = NSMenuItem(title: "Face Right ▶", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        rightItem.target = delegate
+        rightItem.representedObject = "{\"action\":\"SET_FLIP\",\"instanceId\":\"\(instanceId)\",\"flipped\":false}"
+        if !isFlipped { rightItem.state = .on }
+        dirMenu.addItem(rightItem)
+        dirParent.submenu = dirMenu
+        menu.addItem(dirParent)
+
+        let currentOpacity = state.opacity ?? 1.0
+        let opParent = NSMenuItem(title: "Opacity", action: nil, keyEquivalent: "")
+        let opMenu = NSMenu(title: "Opacity")
+        opMenu.autoenablesItems = false
+        let opacityOptions: [(String, Double)] = [
+            ("100%", 1.0),
+            ("80%", 0.8),
+            ("60%", 0.6),
+            ("40%", 0.4)
+        ]
+        for (label, val) in opacityOptions {
+            let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = "{\"action\":\"SET_OPACITY\",\"instanceId\":\"\(instanceId)\",\"opacity\":\(val)}"
+            if abs(currentOpacity - val) < 0.01 {
+                item.state = .on
+            }
+            opMenu.addItem(item)
+        }
+        opParent.submenu = opMenu
+        menu.addItem(opParent)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let isPaused = state.isPaused ?? false
+        let animTitle = isPaused ? "▶ Resume Animation" : "⏸ Pause Animation"
+        let animItem = NSMenuItem(title: animTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        animItem.target = delegate
+        animItem.representedObject = "{\"action\":\"TOGGLE_PAUSE\",\"instanceId\":\"\(instanceId)\"}"
+        menu.addItem(animItem)
+
+        let hasAudioSync = state.audioSync ?? false
+        let syncItem = NSMenuItem(title: "🎵 Sync with Audio Stream", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        syncItem.target = delegate
+        syncItem.representedObject = "{\"action\":\"TOGGLE_AUDIO_SYNC\",\"instanceId\":\"\(instanceId)\"}"
+        if hasAudioSync { syncItem.state = .on }
+        menu.addItem(syncItem)
+
+        let currentSens = state.audioSensitivity ?? 20
+        let sensParent = NSMenuItem(title: "Audio Sensitivity", action: nil, keyEquivalent: "")
+        let sensMenu = NSMenu(title: "Audio Sensitivity")
+        sensMenu.autoenablesItems = false
+        let sensOptions: [(String, Int)] = [
+            ("Very High (5)", 5),
+            ("High (10)", 10),
+            ("Medium (20)", 20),
+            ("Low (35)", 35),
+            ("Very Low (55)", 55)
+        ]
+        for (label, val) in sensOptions {
+            let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = "{\"action\":\"SET_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"audioSensitivity\":\(val)}"
+            if currentSens == val {
+                item.state = .on
+            }
+            sensMenu.addItem(item)
+        }
+
+        sensMenu.addItem(NSMenuItem.separator())
+        let isCustom = !sensOptions.contains { $0.1 == currentSens }
+        let customTitle = isCustom ? "Custom (\(currentSens))…" : "Custom…"
+        let customSensItem = NSMenuItem(title: customTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        customSensItem.target = delegate
+        customSensItem.representedObject = "{\"action\":\"CUSTOM_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"current\":\(currentSens)}"
+        if isCustom { customSensItem.state = .on }
+        sensMenu.addItem(customSensItem)
+
+        sensParent.submenu = sensMenu
+        menu.addItem(sensParent)
+    }
+
+    menu.addItem(NSMenuItem.separator())
+
+    let orderParent = NSMenuItem(title: "Order", action: nil, keyEquivalent: "")
+    let orderMenu = NSMenu(title: "Order")
+    orderMenu.autoenablesItems = false
+    let orderOptions: [(String, String)] = [
+        ("Bring to Front", "ORDER_FRONT"),
+        ("Bring Forward", "ORDER_FORWARD"),
+        ("Send Backward", "ORDER_BACKWARD"),
+        ("Send to Back", "ORDER_BACK")
+    ]
+    for (label, act) in orderOptions {
+        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = "{\"action\":\"\(act)\",\"instanceId\":\"\(instanceId)\"}"
+        orderMenu.addItem(item)
+    }
+    orderParent.submenu = orderMenu
+    menu.addItem(orderParent)
+
+    if hasSticker {
+        let hasShadow = state.shadow ?? true
+        let shadowItem = NSMenuItem(title: "Ambient Shadow", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        shadowItem.target = delegate
+        shadowItem.representedObject = "{\"action\":\"TOGGLE_SHADOW\",\"instanceId\":\"\(instanceId)\"}"
+        if hasShadow { shadowItem.state = .on }
+        menu.addItem(shadowItem)
+    }
+
+    let hasSnapping = state.enableSnapping ?? true
+    let snapItem = NSMenuItem(title: "Snap to Edges", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    snapItem.target = delegate
+    snapItem.representedObject = "{\"action\":\"TOGGLE_SNAPPING\"}"
+    if hasSnapping { snapItem.state = .on }
+    menu.addItem(snapItem)
+
+    menu.addItem(NSMenuItem.separator())
+
+    let resetItem = NSMenuItem(title: "Reset Position", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    resetItem.target = delegate
+    resetItem.representedObject = "{\"action\":\"RESET_POSITION\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(resetItem)
+
+    let screens = NSScreen.screens
+    if screens.count > 1 {
+        let dispParent = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+        let dispMenu = NSMenu(title: "Display")
+        dispMenu.autoenablesItems = false
+        let currentScreen = state.screenId ?? ""
+        let hiddenPlusList = state.hiddenPlusScreens ?? []
+        let allScreenIds: [String] = screens.map { s in
+            let num = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+            return "screen_\(num)"
+        }
+        let hasExactMatch = allScreenIds.contains(currentScreen)
+
+        if hasSticker {
+            for (i, s) in screens.enumerated() {
+                let desc = s.deviceDescription
+                let screenNumber = desc[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+                let sid = "screen_\(screenNumber)"
+                let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
+                let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+                item.target = delegate
+                item.representedObject = "{\"action\":\"MOVE_TO_SCREEN\",\"screenId\":\"\(sid)\",\"instanceId\":\"\(instanceId)\"}"
+                let isCurrent = hasExactMatch ? (currentScreen == sid) : (s == NSScreen.main)
+                if isCurrent {
+                    item.state = .on
+                }
+                dispMenu.addItem(item)
+            }
+            dispMenu.addItem(NSMenuItem.separator())
+        }
+
         for (i, s) in screens.enumerated() {
             let desc = s.deviceDescription
             let screenNumber = desc[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
             let sid = "screen_\(screenNumber)"
             let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
-            let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            let isHidden = hiddenPlusList.contains(sid)
+            let item = NSMenuItem(title: "Show '+' on \(label)", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
             item.target = delegate
-            item.representedObject = "{\"action\":\"MOVE_TO_SCREEN\",\"screenId\":\"\(sid)\",\"instanceId\":\"\(instanceId)\"}"
-            let isCurrent = hasExactMatch ? (currentScreen == sid) : (s == NSScreen.main)
-            if isCurrent {
+            item.representedObject = "{\"action\":\"TOGGLE_SHOW_PLUS\",\"screenId\":\"\(sid)\"}"
+            if !isHidden {
                 item.state = .on
             }
             dispMenu.addItem(item)
         }
-        dispMenu.addItem(NSMenuItem.separator())
+
+        dispParent.submenu = dispMenu
+        menu.addItem(dispParent)
     }
 
-    for (i, s) in screens.enumerated() {
-        let desc = s.deviceDescription
-        let screenNumber = desc[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
-        let sid = "screen_\(screenNumber)"
-        let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
-        let isHidden = hiddenPlusList.contains(sid)
-        let item = NSMenuItem(title: "Show '+' on \(label)", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-        item.target = delegate
-        item.representedObject = "{\"action\":\"TOGGLE_SHOW_PLUS\",\"screenId\":\"\(sid)\"}"
-        if !isHidden {
-            item.state = .on
-        }
-        dispMenu.addItem(item)
-    }
+    let reloadItem = NSMenuItem(title: "Reload Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    reloadItem.target = delegate
+    reloadItem.representedObject = "{\"action\":\"RELOAD_WIDGET\",\"widgetId\":\"\(widgetId)\"}"
+    menu.addItem(reloadItem)
 
-    dispParent.submenu = dispMenu
-    menu.addItem(dispParent)
-}
+    let dupItem = NSMenuItem(title: "Duplicate Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    dupItem.target = delegate
+    dupItem.representedObject = "{\"action\":\"DUPLICATE_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(dupItem)
 
-// Reload Widget
-let reloadItem = NSMenuItem(title: "Reload Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-reloadItem.target = delegate
-reloadItem.representedObject = "{\"action\":\"RELOAD_WIDGET\",\"widgetId\":\"\(widgetId)\"}"
-menu.addItem(reloadItem)
-
-// Duplicate Widget
-let dupItem = NSMenuItem(title: "Duplicate Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-dupItem.target = delegate
-dupItem.representedObject = "{\"action\":\"DUPLICATE_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
-menu.addItem(dupItem)
-
-// Remove Widget
-let removeTitle = hasSticker ? "Remove Widget" : "Hide '+' on This Display"
-let removeItem = NSMenuItem(title: removeTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
-removeItem.target = delegate
-if hasSticker {
-    removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"instanceId\":\"\(instanceId)\",\"widgetId\":\"\(widgetId)\"}"
-} else {
-    let curSid = state.screenId ?? "screen_0"
-    removeItem.representedObject = "{\"action\":\"HIDE_PLUS_ON_SCREEN\",\"screenId\":\"\(curSid)\"}"
-}
-menu.addItem(removeItem)
-
-// Pop up native menu above all windows at cursor location
-popUpMenuAtMouse(menu: menu)
-
-if let action = delegate.outputAction {
-    if action.contains("OPEN_MANAGER") {
-        if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) {
-            print(result)
-        }
-    } else if action.contains("QUICK_CREATE_NEW") {
-        if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker, autoCreateForInstance: instanceId) {
-            print(result)
-        }
-    } else if action.contains("OPEN_STUDIO") {
-        if let curPath = resolveStickerPath(state.currentSticker, widgetDir: widgetDir) {
-            if let result = openStickerCutoutStudio(sourcePath: curPath, widgetDir: widgetDir, instanceId: instanceId) {
-                print(result)
-            }
-        }
-    } else if action.contains("TRIGGER_FINDER_PICKER") {
-        if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
-            print(result)
-        }
-    } else if action.contains("CUSTOM_AUDIO_SENSITIVITY") {
-        let currentSens = state.audioSensitivity ?? 20
-        if let val = promptForCustomSensitivity(current: currentSens) {
-            print("{\"action\":\"SET_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"audioSensitivity\":\(val)}")
-        }
+    let removeTitle = hasSticker ? "Remove Widget" : "Hide '+' on This Display"
+    let removeItem = NSMenuItem(title: removeTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    removeItem.target = delegate
+    if hasSticker {
+        removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"instanceId\":\"\(instanceId)\",\"widgetId\":\"\(widgetId)\"}"
     } else {
-        if let data = action.data(using: .utf8),
-           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-           let act = json["action"] as? String {
-            if act == "CLEAR_STICKER" {
-                if let st = json["sticker"] as? String {
-                    removeStickerFiles(stickerRelPath: st, widgetDir: widgetDir)
+        let curSid = state.screenId ?? "screen_0"
+        removeItem.representedObject = "{\"action\":\"HIDE_PLUS_ON_SCREEN\",\"screenId\":\"\(curSid)\"}"
+    }
+    menu.addItem(removeItem)
+
+    popUpMenuAtMouse(menu: menu, delegate: delegate)
+
+    if let action = delegate.outputAction {
+        if action.contains("OPEN_MANAGER") {
+            if allowModalWindows {
+                return openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker) ?? ""
+            }
+            return action
+        } else if action.contains("QUICK_CREATE_NEW") {
+            if allowModalWindows {
+                return openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker, autoCreateForInstance: instanceId) ?? ""
+            }
+            return action
+        } else if action.contains("OPEN_STUDIO") {
+            if allowModalWindows {
+                if let curPath = resolveStickerPath(state.currentSticker, widgetDir: widgetDir) {
+                    return openStickerCutoutStudio(sourcePath: curPath, widgetDir: widgetDir, instanceId: instanceId) ?? ""
                 }
-            } else if act == "RELOAD_WIDGET" {
-                reloadWidget(widgetId: widgetId)
+                return ""
+            }
+            return action
+        } else if action.contains("TRIGGER_FINDER_PICKER") {
+            return pickAndImport(widgetDir: widgetDir, instanceId: instanceId) ?? ""
+        } else if action.contains("CUSTOM_AUDIO_SENSITIVITY") {
+            let currentSens = state.audioSensitivity ?? 20
+            if let val = promptForCustomSensitivity(current: currentSens) {
+                return "{\"action\":\"SET_AUDIO_SENSITIVITY\",\"instanceId\":\"\(instanceId)\",\"audioSensitivity\":\(val)}"
+            }
+            return ""
+        } else {
+            if let data = action.data(using: .utf8),
+               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let act = json["action"] as? String {
+                if act == "CLEAR_STICKER" {
+                    if let st = json["sticker"] as? String {
+                        removeStickerFiles(stickerRelPath: st, widgetDir: widgetDir)
+                    }
+                } else if act == "RELOAD_WIDGET" {
+                    DispatchQueue.global().async {
+                        reloadWidget(widgetId: widgetId)
+                    }
+                }
+            }
+            return action
+        }
+    }
+    return ""
+}
+
+func sendHttpResponse(_ clientFd: Int32, status: String = "200 OK", body: String = "") {
+    let bodyData = body.data(using: .utf8) ?? Data()
+    let header = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: \(bodyData.count)\r\nConnection: close\r\n\r\n"
+    var fullData = header.data(using: .utf8) ?? Data()
+    fullData.append(bodyData)
+    fullData.withUnsafeBytes { rawBuf in
+        if let base = rawBuf.baseAddress {
+            _ = write(clientFd, base, fullData.count)
+        }
+    }
+    close(clientFd)
+}
+
+func handleHttpClient(_ clientFd: Int32, widgetDir: String, widgetId: String) {
+    var flag: Int32 = 1
+    setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &flag, socklen_t(MemoryLayout<Int32>.size))
+
+    var requestData = Data()
+    var buf = [UInt8](repeating: 0, count: 8192)
+    var expectedTotalBytes: Int? = nil
+
+    while true {
+        let n = read(clientFd, &buf, buf.count)
+        if n <= 0 { break }
+        requestData.append(contentsOf: buf[0..<n])
+
+        if expectedTotalBytes == nil,
+           let str = String(data: requestData, encoding: .utf8),
+           let headerEndRange = str.range(of: "\r\n\r\n") {
+            let headerPart = String(str[..<headerEndRange.lowerBound])
+            let headerByteLen = headerPart.utf8.count + 4
+            var contentLen = 0
+            for line in headerPart.components(separatedBy: "\r\n") {
+                if line.lowercased().hasPrefix("content-length:") {
+                    let valStr = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
+                    contentLen = Int(valStr) ?? 0
+                }
+            }
+            expectedTotalBytes = headerByteLen + contentLen
+        }
+
+        if let expected = expectedTotalBytes, requestData.count >= expected {
+            break
+        }
+    }
+
+    guard let rawReq = String(data: requestData, encoding: .utf8), !rawReq.isEmpty else {
+        close(clientFd)
+        return
+    }
+
+    let firstLine = rawReq.components(separatedBy: "\r\n").first ?? ""
+    if firstLine.hasPrefix("OPTIONS ") {
+        sendHttpResponse(clientFd, status: "204 No Content", body: "")
+        return
+    }
+
+    if firstLine.hasPrefix("GET /screens") {
+        var jsonOut = "[]"
+        let sem = DispatchSemaphore(value: 0)
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+            jsonOut = getScreensJson()
+            sem.signal()
+        }
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+        sem.wait()
+        sendHttpResponse(clientFd, body: jsonOut)
+        return
+    }
+
+    var bodyStr = ""
+    if let range = rawReq.range(of: "\r\n\r\n") {
+        bodyStr = String(rawReq[range.upperBound...])
+    }
+
+    if isMenuOpen {
+        let nowTs = Date().timeIntervalSince1970
+        lastDismissTs = nowTs
+        try? String(format: "%.4f", nowTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
+        CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+            activeMenu?.cancelTracking()
+        }
+        CFRunLoopWakeUp(CFRunLoopGetMain())
+        sendHttpResponse(clientFd, body: "")
+        return
+    }
+
+    var reqState = MenuState()
+    if let data = bodyStr.data(using: .utf8) {
+        reqState = (try? JSONDecoder().decode(MenuState.self, from: data)) ?? MenuState()
+    }
+
+    var actionResult = ""
+    let sem = DispatchSemaphore(value: 0)
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+        actionResult = executeStickerMenuOnMain(state: reqState, widgetDir: widgetDir, widgetId: widgetId, allowModalWindows: false)
+        sem.signal()
+    }
+    CFRunLoopWakeUp(CFRunLoopGetMain())
+    sem.wait()
+
+    sendHttpResponse(clientFd, body: actionResult)
+}
+
+func runDaemon(widgetDir: String, widgetId: String) -> Never {
+    let serverFd = socket(AF_INET, SOCK_STREAM, 0)
+    if serverFd < 0 { exit(1) }
+
+    var reuse: Int32 = 1
+    setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+    var addr = sockaddr_in()
+    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = daemonPort.bigEndian
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+    let bindRes = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            bind(serverFd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    if bindRes < 0 {
+        close(serverFd)
+        exit(0)
+    }
+
+    if listen(serverFd, 16) < 0 {
+        close(serverFd)
+        exit(1)
+    }
+
+    try? "\(getpid())".write(toFile: daemonPidFile, atomically: true, encoding: .utf8)
+
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+
+    signal(SIGUSR1, SIG_IGN)
+    let sigSrc = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+    sigSrc.setEventHandler {
+        if isMenuOpen, let m = activeMenu {
+            let nowTs = Date().timeIntervalSince1970
+            lastDismissTs = nowTs
+            try? String(format: "%.4f", nowTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
+            m.cancelTracking()
+        }
+    }
+    sigSrc.resume()
+
+    DispatchQueue.global(qos: .userInteractive).async {
+        while true {
+            let clientFd = accept(serverFd, nil, nil)
+            if clientFd < 0 { continue }
+            DispatchQueue.global(qos: .userInteractive).async {
+                handleHttpClient(clientFd, widgetDir: widgetDir, widgetId: widgetId)
             }
         }
-        print(action)
     }
+
+    RunLoop.main.run()
+    exit(0)
+}
+
+// MARK: - Main Execution
+
+let helperPath = CommandLine.arguments[0]
+var widgetDirURL = URL(fileURLWithPath: helperPath).deletingLastPathComponent()
+if widgetDirURL.path.contains(".app/Contents/MacOS") {
+    widgetDirURL = widgetDirURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+}
+let widgetDir = widgetDirURL.path
+let widgetFolder = widgetDirURL.lastPathComponent
+let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
+
+if CommandLine.arguments.contains("--daemon") {
+    runDaemon(widgetDir: widgetDir, widgetId: widgetId)
+}
+
+ensureDaemonRunning(helperPath: helperPath)
+
+var state = MenuState()
+if CommandLine.arguments.count > 1 {
+    let jsonStr = CommandLine.arguments[1]
+    if let data = jsonStr.data(using: .utf8) {
+        state = (try? JSONDecoder().decode(MenuState.self, from: data)) ?? MenuState()
+    }
+} else {
+    state.mode = "MANAGER"
+    state.instanceId = "default"
+}
+
+if CommandLine.arguments.contains("--screens") || state.mode == "GET_SCREENS" {
+    print(getScreensJson())
+    exit(0)
+}
+
+ProcessInfo.processInfo.processName = "Übersicht"
+let app = NSApplication.shared
+app.delegate = appDelegate
+app.setActivationPolicy(.accessory)
+
+let mode = state.mode ?? "CONTEXT_MENU"
+let instanceId = state.instanceId ?? "default"
+
+if mode == "SYNC_DISPLAYS" || CommandLine.arguments.contains("--sync-displays") {
+    let result = syncWidgetsToTargetDisplay(targetPattern: state.targetName ?? "ASUS")
+    print(result)
+    exit(0)
+}
+
+if mode == "PICK_ONLY" {
+    if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
+        print(result)
+    }
+    exit(0)
+}
+
+if mode == "MANAGER" || mode == "QUICK_CREATE_NEW" {
+    if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker, autoCreateForInstance: mode == "QUICK_CREATE_NEW" ? instanceId : nil) {
+        print(result)
+    }
+    exit(0)
+}
+
+if mode == "STUDIO" {
+    if let curPath = resolveStickerPath(state.currentSticker, widgetDir: widgetDir) {
+        if let result = openStickerCutoutStudio(sourcePath: curPath, widgetDir: widgetDir, instanceId: instanceId) {
+            print(result)
+        }
+    } else if let src = chooseImageFile() {
+        if let result = openStickerCutoutStudio(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId) {
+            print(result)
+        }
+    }
+    exit(0)
+}
+
+let out = executeStickerMenuOnMain(state: state, widgetDir: widgetDir, widgetId: widgetId, allowModalWindows: true)
+if !out.isEmpty {
+    print(out)
 }
