@@ -1261,6 +1261,7 @@ export const updateState = (event, previousState) => {
 
 initWidgetDesktopSync({
   widgetId: 'sticker',
+  run,
   helperPaths: [
     '$HOME/Library/Application Support/Übersicht/widgets/sticker.widget/menu_helper',
     './sticker.widget/menu_helper',
