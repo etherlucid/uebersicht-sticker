@@ -5,9 +5,26 @@ import Vision
 import ImageIO
 import UniformTypeIdentifiers
 
+struct StreamInfo: Codable {
+    var index: Int
+    var title: String?
+    var artist: String?
+    var appName: String?
+    var isActive: Bool?
+}
+
 struct MenuState: Codable {
+    var widget: String?
     var mode: String?              // "PLUS_CLICK" or "CONTEXT_MENU" or "PICK_ONLY" or "MANAGER" or "STUDIO" or "SYNC_DISPLAYS"
     var instanceId: String?
+    var sizePreset: String?
+    var isPlaying: Bool?
+    var title: String?
+    var artist: String?
+    var appName: String?
+    var streams: [StreamInfo]?
+    var canRerun: Bool?
+    var rerunTitle: String?
     var currentSticker: String?    // relative path e.g. "sticker.widget/stickers/cat.webp" or nil
     var targetName: String?
     var scale: Double?
@@ -1994,14 +2011,43 @@ func logHelper(_ msg: String) {
     }
 }
 
-let daemonPort: UInt16 = 41424
-let daemonPidFile = "/tmp/uebersicht_menu_daemon_sticker.pid"
-let menuPidFile = "/tmp/uebersicht_active_menu.pid"
-let menuDismissFile = "/tmp/uebersicht_menu_dismissed.ts"
+let daemonPorts: [(UInt16, String)] = [
+    (41421, "nowplaying"),
+    (41422, "cava"),
+    (41423, "shell"),
+    (41424, "sticker")
+]
+let daemonPidFile = "/tmp/uebersicht_menu_daemon.pid"
 
 var activeMenu: NSMenu? = nil
+var activeMenuKey: String = ""
 var isMenuOpen = false
+var cancelledByToggle = false
+var cancelledForSwitch = false
+var lastDismissKey: String = ""
 var lastDismissTs: Double = 0
+let menuLock = DispatchSemaphore(value: 1)
+let stateLock = NSLock()
+var latestRequestId: UInt64 = 0
+
+func resolveStickerWidgetDir(fallbackDir: String) -> String {
+    let liveStickerDir = NSHomeDirectory() + "/Library/Application Support/Übersicht/widgets/sticker.widget"
+    if FileManager.default.fileExists(atPath: liveStickerDir) {
+        return liveStickerDir
+    }
+    let repoStickerDir = NSHomeDirectory() + "/Documents/antigravity/uebersicht-sticker/sticker.widget"
+    if FileManager.default.fileExists(atPath: repoStickerDir) {
+        return repoStickerDir
+    }
+    return fallbackDir
+}
+
+func drainEvents(_ waitSecs: TimeInterval = 0.012) {
+    let deadline = waitSecs > 0 ? Date(timeIntervalSinceNow: waitSecs) : Date.distantPast
+    while let ev = NSApp.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true) {
+        NSApp.sendEvent(ev)
+    }
+}
 
 func ensureDaemonRunning(helperPath: String) {
     if let pidStr = try? String(contentsOfFile: daemonPidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
@@ -2065,56 +2111,250 @@ func promptForCustomSensitivity(current: Int) -> Int? {
 }
 
 @discardableResult
-func popUpMenuAtMouse(menu: NSMenu, delegate: MenuDelegate) -> Bool {
+func popUpMenuAtMouse(menu: NSMenu, delegate: MenuDelegate, reqKey: String) -> Bool {
     let nowTs = Date().timeIntervalSince1970
 
-    if let pidStr = try? String(contentsOfFile: menuPidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-       let oldPid = Int32(pidStr), oldPid > 0, oldPid != getpid() {
-        if kill(oldPid, 0) == 0 {
-            kill(oldPid, SIGUSR1)
-            try? FileManager.default.removeItem(atPath: menuPidFile)
-            try? String(format: "%.4f", nowTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
-            lastDismissTs = nowTs
-            return false
-        }
-    }
-
-    if (nowTs - lastDismissTs) >= 0 && (nowTs - lastDismissTs) < 0.25 {
+    if reqKey == lastDismissKey && (nowTs - lastDismissTs) >= 0 && (nowTs - lastDismissTs) < 0.12 {
+        lastDismissKey = ""
         lastDismissTs = 0
-        try? FileManager.default.removeItem(atPath: menuDismissFile)
         return false
     }
 
-    if let tsStr = try? String(contentsOfFile: menuDismissFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-       let fileDismiss = Double(tsStr) {
-        try? FileManager.default.removeItem(atPath: menuDismissFile)
-        if (nowTs - fileDismiss) >= 0 && (nowTs - fileDismiss) < 0.25 {
-            lastDismissTs = 0
-            return false
-        }
-    }
+    drainEvents(0.012)
+    NSApp.activate(ignoringOtherApps: true)
+    drainEvents(0.006)
 
     activeMenu = menu
+    activeMenuKey = reqKey
     isMenuOpen = true
-    try? "\(getpid())".write(toFile: menuPidFile, atomically: true, encoding: .utf8)
-    NSApp.activate(ignoringOtherApps: true)
+    cancelledByToggle = false
+    cancelledForSwitch = false
+
     let mouseLoc = NSEvent.mouseLocation
     let result = menu.popUp(positioning: nil, at: mouseLoc, in: nil)
+
+    let wasToggle = cancelledByToggle
+    let wasSwitch = cancelledForSwitch
     isMenuOpen = false
     activeMenu = nil
-    try? FileManager.default.removeItem(atPath: menuPidFile)
-    if !result && delegate.outputAction == nil {
-        let endTs = Date().timeIntervalSince1970
-        lastDismissTs = endTs
-        try? String(format: "%.4f", endTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
-    } else {
+    activeMenuKey = ""
+    cancelledByToggle = false
+    cancelledForSwitch = false
+
+    if wasSwitch {
+        lastDismissKey = ""
         lastDismissTs = 0
-        try? FileManager.default.removeItem(atPath: menuDismissFile)
+    } else if wasToggle || (!result && delegate.outputAction == nil) {
+        let endTs = Date().timeIntervalSince1970
+        lastDismissKey = reqKey
+        lastDismissTs = endTs
+        NSApp.deactivate()
+        drainEvents(0.005)
+    } else {
+        lastDismissKey = ""
+        lastDismissTs = 0
+        NSApp.deactivate()
+        drainEvents(0.005)
     }
     return result
 }
 
-func executeStickerMenuOnMain(state: MenuState, widgetDir: String, widgetId: String, allowModalWindows: Bool) -> String {
+func addCommonBottomMenuItems(menu: NSMenu, state: MenuState, delegate: MenuDelegate, instanceId: String, widgetId: String) {
+    let orderParent = NSMenuItem(title: "Order", action: nil, keyEquivalent: "")
+    let orderMenu = NSMenu(title: "Order")
+    orderMenu.autoenablesItems = false
+    let orderOptions: [(String, String)] = [
+        ("Bring to Front", "ORDER_FRONT"),
+        ("Bring Forward", "ORDER_FORWARD"),
+        ("Send Backward", "ORDER_BACKWARD"),
+        ("Send to Back", "ORDER_BACK")
+    ]
+    for (label, act) in orderOptions {
+        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = "{\"action\":\"\(act)\"}"
+        orderMenu.addItem(item)
+    }
+    orderParent.submenu = orderMenu
+    menu.addItem(orderParent)
+
+    let hasSnapping = state.enableSnapping ?? true
+    let snapItem = NSMenuItem(title: "Snap to Edges", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    snapItem.target = delegate
+    snapItem.representedObject = "{\"action\":\"TOGGLE_SNAPPING\"}"
+    if hasSnapping {
+        snapItem.state = .on
+    }
+    menu.addItem(snapItem)
+
+    menu.addItem(NSMenuItem.separator())
+
+    let resetItem = NSMenuItem(title: "Reset Position", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    resetItem.target = delegate
+    resetItem.representedObject = "{\"action\":\"RESET_POSITION\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(resetItem)
+
+    let screens = NSScreen.screens
+    if screens.count > 1 {
+        let dispParent = NSMenuItem(title: "Display", action: nil, keyEquivalent: "")
+        let dispMenu = NSMenu(title: "Display")
+        dispMenu.autoenablesItems = false
+        let currentScreen = state.screenId ?? ""
+        let allScreenIds: [String] = screens.map { s in
+            let desc = s.deviceDescription
+            let screenNumber = desc[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+            return "screen_\(screenNumber)"
+        }
+        let hasExactMatch = allScreenIds.contains(currentScreen)
+        for (i, s) in screens.enumerated() {
+            let sid = allScreenIds[i]
+            let label = s.localizedName.isEmpty ? "Display \(i + 1)" : s.localizedName
+            let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = "{\"action\":\"MOVE_TO_SCREEN\",\"screenId\":\"\(sid)\",\"instanceId\":\"\(instanceId)\"}"
+            let isCurrent = hasExactMatch ? (currentScreen == sid) : (s == NSScreen.main)
+            if isCurrent {
+                item.state = .on
+            }
+            dispMenu.addItem(item)
+        }
+        dispParent.submenu = dispMenu
+        menu.addItem(dispParent)
+    }
+
+    let reloadItem = NSMenuItem(title: "Reload Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    reloadItem.target = delegate
+    reloadItem.representedObject = "{\"action\":\"RELOAD_WIDGET\",\"widgetId\":\"\(widgetId)\"}"
+    menu.addItem(reloadItem)
+
+    let dupItem = NSMenuItem(title: "Duplicate Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    dupItem.target = delegate
+    dupItem.representedObject = "{\"action\":\"DUPLICATE_WIDGET\",\"instanceId\":\"\(instanceId)\"}"
+    menu.addItem(dupItem)
+
+    let removeItem = NSMenuItem(title: "Remove Widget", action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    removeItem.target = delegate
+    removeItem.representedObject = "{\"action\":\"REMOVE_WIDGET\",\"instanceId\":\"\(instanceId)\",\"widgetId\":\"\(widgetId)\"}"
+    menu.addItem(removeItem)
+}
+
+func buildNowPlayingMenu(state: MenuState, delegate: MenuDelegate) -> NSMenu {
+    let instanceId = state.instanceId ?? "default"
+    let currentPreset = state.sizePreset ?? "medium"
+    let widgetId = "nowplaying-widget-index-jsx"
+
+    let menu = NSMenu(title: "Now Playing Controls")
+    menu.autoenablesItems = false
+
+    let sizeOptions: [(String, String)] = [
+        ("Small", "small"),
+        ("Medium", "medium"),
+        ("Large", "large")
+    ]
+    for (label, key) in sizeOptions {
+        let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = "{\"action\":\"SET_SIZE_PRESET\",\"preset\":\"\(key)\",\"instanceId\":\"\(instanceId)\"}"
+        if currentPreset == key {
+            item.state = .on
+        }
+        menu.addItem(item)
+    }
+
+    menu.addItem(NSMenuItem.separator())
+
+    if let streams = state.streams, streams.count > 1 {
+        let streamParent = NSMenuItem(title: "Audio Source", action: nil, keyEquivalent: "")
+        let streamMenu = NSMenu(title: "Audio Source")
+        streamMenu.autoenablesItems = false
+        for s in streams {
+            let appName = s.appName ?? "Player"
+            let sTitle = s.title ?? "Unknown Track"
+            let fullLabel = "\(appName): \(sTitle)"
+            let label = fullLabel.count > 32 ? String(fullLabel.prefix(29)) + "…" : fullLabel
+            let item = NSMenuItem(title: label, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = "{\"action\":\"SET_STREAM_INDEX\",\"index\":\(s.index),\"instanceId\":\"\(instanceId)\"}"
+            if s.isActive == true {
+                item.state = .on
+            }
+            streamMenu.addItem(item)
+        }
+        streamParent.submenu = streamMenu
+        menu.addItem(streamParent)
+    }
+
+    addCommonBottomMenuItems(menu: menu, state: state, delegate: delegate, instanceId: instanceId, widgetId: widgetId)
+    return menu
+}
+
+func buildCavaMenu(state: MenuState, delegate: MenuDelegate) -> NSMenu {
+    let instanceId = state.instanceId ?? "default"
+    let widgetId = "cava-widget-index-jsx"
+    let menu = NSMenu(title: "CAVA Controls")
+    menu.autoenablesItems = false
+    addCommonBottomMenuItems(menu: menu, state: state, delegate: delegate, instanceId: instanceId, widgetId: widgetId)
+    return menu
+}
+
+func buildShellMenu(state: MenuState, delegate: MenuDelegate) -> NSMenu {
+    let instanceId = state.instanceId ?? "default"
+    let widgetId = "shell-widget-index-jsx"
+    let menu = NSMenu(title: "Shell Controls")
+    menu.autoenablesItems = false
+
+    let rerunTitle = state.rerunTitle ?? "Run Again"
+    let rerunItem = NSMenuItem(title: rerunTitle, action: #selector(MenuDelegate.handleItem(_:)), keyEquivalent: "")
+    rerunItem.target = delegate
+    rerunItem.representedObject = "{\"action\":\"RUN_AGAIN\"}"
+    if let canRerun = state.canRerun {
+        rerunItem.isEnabled = canRerun
+    }
+    menu.addItem(rerunItem)
+    menu.addItem(NSMenuItem.separator())
+
+    addCommonBottomMenuItems(menu: menu, state: state, delegate: delegate, instanceId: instanceId, widgetId: widgetId)
+    return menu
+}
+
+func executeUnifiedMenuOnMain(widgetName: String, state: MenuState, reqKey: String, fallbackWidgetDir: String, allowModalWindows: Bool) -> String {
+    if widgetName == "nowplaying" || widgetName == "cava" || widgetName == "shell" {
+        let delegate = MenuDelegate()
+        let menu: NSMenu
+        let widgetId: String
+        if widgetName == "nowplaying" {
+            menu = buildNowPlayingMenu(state: state, delegate: delegate)
+            widgetId = "nowplaying-widget-index-jsx"
+        } else if widgetName == "cava" {
+            menu = buildCavaMenu(state: state, delegate: delegate)
+            widgetId = "cava-widget-index-jsx"
+        } else {
+            menu = buildShellMenu(state: state, delegate: delegate)
+            widgetId = "shell-widget-index-jsx"
+        }
+
+        popUpMenuAtMouse(menu: menu, delegate: delegate, reqKey: reqKey)
+
+        if let action = delegate.outputAction {
+            if let data = action.data(using: .utf8),
+               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+               let act = json["action"] as? String {
+                if act == "RELOAD_WIDGET" {
+                    DispatchQueue.global().async {
+                        reloadWidget(widgetId: widgetId)
+                    }
+                }
+            }
+            return action
+        }
+        return ""
+    }
+
+    let stickerWidgetDir = resolveStickerWidgetDir(fallbackDir: fallbackWidgetDir)
+    return executeStickerMenuOnMain(state: state, widgetDir: stickerWidgetDir, widgetId: "sticker-widget-index-jsx", reqKey: reqKey, allowModalWindows: allowModalWindows)
+}
+
+func executeStickerMenuOnMain(state: MenuState, widgetDir: String, widgetId: String, reqKey: String, allowModalWindows: Bool) -> String {
     let mode = state.mode ?? "CONTEXT_MENU"
     let instanceId = state.instanceId ?? "default"
     let localStickers = getLocalStickers(widgetDir: widgetDir)
@@ -2155,7 +2395,7 @@ func executeStickerMenuOnMain(state: MenuState, widgetDir: String, widgetId: Str
         finderItem.representedObject = "{\"action\":\"TRIGGER_FINDER_PICKER\",\"instanceId\":\"\(instanceId)\"}"
         menu.addItem(finderItem)
 
-        popUpMenuAtMouse(menu: menu, delegate: delegate)
+        popUpMenuAtMouse(menu: menu, delegate: delegate, reqKey: reqKey)
 
         if let action = delegate.outputAction {
             if action.contains("OPEN_MANAGER") {
@@ -2442,7 +2682,7 @@ func executeStickerMenuOnMain(state: MenuState, widgetDir: String, widgetId: Str
     }
     menu.addItem(removeItem)
 
-    popUpMenuAtMouse(menu: menu, delegate: delegate)
+    popUpMenuAtMouse(menu: menu, delegate: delegate, reqKey: reqKey)
 
     if let action = delegate.outputAction {
         if action.contains("OPEN_MANAGER") {
@@ -2504,7 +2744,7 @@ func sendHttpResponse(_ clientFd: Int32, status: String = "200 OK", body: String
     close(clientFd)
 }
 
-func handleHttpClient(_ clientFd: Int32, widgetDir: String, widgetId: String) {
+func handleHttpClient(_ clientFd: Int32, defaultWidget: String, fallbackWidgetDir: String) {
     var flag: Int32 = 1
     setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &flag, socklen_t(MemoryLayout<Int32>.size))
 
@@ -2566,86 +2806,137 @@ func handleHttpClient(_ clientFd: Int32, widgetDir: String, widgetId: String) {
         bodyStr = String(rawReq[range.upperBound...])
     }
 
-    if isMenuOpen {
-        let nowTs = Date().timeIntervalSince1970
-        lastDismissTs = nowTs
-        try? String(format: "%.4f", nowTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
-        CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
-            activeMenu?.cancelTracking()
-        }
-        CFRunLoopWakeUp(CFRunLoopGetMain())
-        sendHttpResponse(clientFd, body: "")
-        return
-    }
-
     var reqState = MenuState()
     if let data = bodyStr.data(using: .utf8) {
         reqState = (try? JSONDecoder().decode(MenuState.self, from: data)) ?? MenuState()
     }
 
+    let widgetName = reqState.widget ?? defaultWidget
+    let instId = reqState.instanceId ?? "default"
+    let reqKey = "\(widgetName):\(instId)"
+
+    if isMenuOpen {
+        if reqKey == activeMenuKey {
+            let nowTs = Date().timeIntervalSince1970
+            lastDismissKey = reqKey
+            lastDismissTs = nowTs
+            cancelledByToggle = true
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+                activeMenu?.cancelTracking()
+            }
+            CFRunLoopWakeUp(CFRunLoopGetMain())
+            sendHttpResponse(clientFd, body: "")
+            return
+        } else {
+            cancelledForSwitch = true
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+                activeMenu?.cancelTracking()
+            }
+            CFRunLoopWakeUp(CFRunLoopGetMain())
+        }
+    }
+
+    stateLock.lock()
+    latestRequestId &+= 1
+    let myReqId = latestRequestId
+    stateLock.unlock()
+
+    menuLock.wait()
+    stateLock.lock()
+    let isSuperseded = (myReqId != latestRequestId)
+    stateLock.unlock()
+
+    if isSuperseded {
+        menuLock.signal()
+        sendHttpResponse(clientFd, body: "")
+        return
+    }
+
     var actionResult = ""
     let sem = DispatchSemaphore(value: 0)
     CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
-        actionResult = executeStickerMenuOnMain(state: reqState, widgetDir: widgetDir, widgetId: widgetId, allowModalWindows: false)
+        actionResult = executeUnifiedMenuOnMain(
+            widgetName: widgetName,
+            state: reqState,
+            reqKey: reqKey,
+            fallbackWidgetDir: fallbackWidgetDir,
+            allowModalWindows: false
+        )
         sem.signal()
     }
     CFRunLoopWakeUp(CFRunLoopGetMain())
     sem.wait()
+    menuLock.signal()
 
     sendHttpResponse(clientFd, body: actionResult)
 }
 
-func runDaemon(widgetDir: String, widgetId: String) -> Never {
-    let serverFd = socket(AF_INET, SOCK_STREAM, 0)
-    if serverFd < 0 { exit(1) }
+func bindPort(_ port: UInt16) -> Int32 {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return -1 }
 
     var reuse: Int32 = 1
-    setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
 
     var addr = sockaddr_in()
     addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
     addr.sin_family = sa_family_t(AF_INET)
-    addr.sin_port = daemonPort.bigEndian
+    addr.sin_port = port.bigEndian
     addr.sin_addr.s_addr = inet_addr("127.0.0.1")
 
     let bindRes = withUnsafePointer(to: &addr) {
         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-            bind(serverFd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
         }
     }
     if bindRes < 0 {
-        close(serverFd)
+        close(fd)
+        return -1
+    }
+    if listen(fd, 16) < 0 {
+        close(fd)
+        return -1
+    }
+    return fd
+}
+
+func runDaemon(widgetDir: String) -> Never {
+    var boundSockets: [(Int32, String)] = []
+    for (port, wName) in daemonPorts {
+        let fd = bindPort(port)
+        if fd >= 0 {
+            boundSockets.append((fd, wName))
+        }
+    }
+    if boundSockets.isEmpty {
         exit(0)
     }
 
-    if listen(serverFd, 16) < 0 {
-        close(serverFd)
-        exit(1)
+    let pidStr = "\(getpid())"
+    try? pidStr.write(toFile: daemonPidFile, atomically: true, encoding: .utf8)
+    for (_, wName) in daemonPorts {
+        try? pidStr.write(toFile: "/tmp/uebersicht_menu_daemon_\(wName).pid", atomically: true, encoding: .utf8)
     }
-
-    try? "\(getpid())".write(toFile: daemonPidFile, atomically: true, encoding: .utf8)
 
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    app.finishLaunching()
 
-    signal(SIGUSR1, SIG_IGN)
-    let sigSrc = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-    sigSrc.setEventHandler {
-        if isMenuOpen, let m = activeMenu {
-            let nowTs = Date().timeIntervalSince1970
-            lastDismissTs = nowTs
-            try? String(format: "%.4f", nowTs).write(toFile: menuDismissFile, atomically: true, encoding: .utf8)
-            m.cancelTracking()
+    // Continuously drain WindowServer NSEvents (such as ApplicationDeactivated) while idle
+    Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { _ in
+        if !isMenuOpen {
+            drainEvents(0.0)
         }
     }
-    sigSrc.resume()
 
-    DispatchQueue.global(qos: .userInteractive).async {
-        while true {
-            let clientFd = accept(serverFd, nil, nil)
-            if clientFd < 0 { continue }
-            DispatchQueue.global(qos: .userInteractive).async {
-                handleHttpClient(clientFd, widgetDir: widgetDir, widgetId: widgetId)
+    for (serverFd, defaultWidget) in boundSockets {
+        DispatchQueue.global(qos: .userInteractive).async {
+            while true {
+                let clientFd = accept(serverFd, nil, nil)
+                if clientFd < 0 { continue }
+                DispatchQueue.global(qos: .userInteractive).async {
+                    handleHttpClient(clientFd, defaultWidget: defaultWidget, fallbackWidgetDir: widgetDir)
+                }
             }
         }
     }
@@ -2664,9 +2955,10 @@ if widgetDirURL.path.contains(".app/Contents/MacOS") {
 let widgetDir = widgetDirURL.path
 let widgetFolder = widgetDirURL.lastPathComponent
 let widgetId = widgetFolder.replacingOccurrences(of: ".", with: "-") + "-index-jsx"
+let inferredWidget = widgetFolder.replacingOccurrences(of: ".widget", with: "")
 
 if CommandLine.arguments.contains("--daemon") {
-    runDaemon(widgetDir: widgetDir, widgetId: widgetId)
+    runDaemon(widgetDir: widgetDir)
 }
 
 ensureDaemonRunning(helperPath: helperPath)
@@ -2691,9 +2983,11 @@ ProcessInfo.processInfo.processName = "Übersicht"
 let app = NSApplication.shared
 app.delegate = appDelegate
 app.setActivationPolicy(.accessory)
+app.finishLaunching()
 
 let mode = state.mode ?? "CONTEXT_MENU"
 let instanceId = state.instanceId ?? "default"
+let targetWidget = state.widget ?? inferredWidget
 
 if mode == "SYNC_DISPLAYS" || CommandLine.arguments.contains("--sync-displays") {
     let result = syncWidgetsToTargetDisplay(targetPattern: state.targetName ?? "ASUS")
@@ -2701,34 +2995,37 @@ if mode == "SYNC_DISPLAYS" || CommandLine.arguments.contains("--sync-displays") 
     exit(0)
 }
 
+let stickerWidgetDir = resolveStickerWidgetDir(fallbackDir: widgetDir)
+
 if mode == "PICK_ONLY" {
-    if let result = pickAndImport(widgetDir: widgetDir, instanceId: instanceId) {
+    if let result = pickAndImport(widgetDir: stickerWidgetDir, instanceId: instanceId) {
         print(result)
     }
     exit(0)
 }
 
 if mode == "MANAGER" || mode == "QUICK_CREATE_NEW" {
-    if let result = openStickerManager(widgetDir: widgetDir, instanceId: instanceId, currentSticker: state.currentSticker, autoCreateForInstance: mode == "QUICK_CREATE_NEW" ? instanceId : nil) {
+    if let result = openStickerManager(widgetDir: stickerWidgetDir, instanceId: instanceId, currentSticker: state.currentSticker, autoCreateForInstance: mode == "QUICK_CREATE_NEW" ? instanceId : nil) {
         print(result)
     }
     exit(0)
 }
 
 if mode == "STUDIO" {
-    if let curPath = resolveStickerPath(state.currentSticker, widgetDir: widgetDir) {
-        if let result = openStickerCutoutStudio(sourcePath: curPath, widgetDir: widgetDir, instanceId: instanceId) {
+    if let curPath = resolveStickerPath(state.currentSticker, widgetDir: stickerWidgetDir) {
+        if let result = openStickerCutoutStudio(sourcePath: curPath, widgetDir: stickerWidgetDir, instanceId: instanceId) {
             print(result)
         }
     } else if let src = chooseImageFile() {
-        if let result = openStickerCutoutStudio(sourcePath: src, widgetDir: widgetDir, instanceId: instanceId) {
+        if let result = openStickerCutoutStudio(sourcePath: src, widgetDir: stickerWidgetDir, instanceId: instanceId) {
             print(result)
         }
     }
     exit(0)
 }
 
-let out = executeStickerMenuOnMain(state: state, widgetDir: widgetDir, widgetId: widgetId, allowModalWindows: true)
+let reqKey = "\(targetWidget):\(instanceId)"
+let out = executeUnifiedMenuOnMain(widgetName: targetWidget, state: state, reqKey: reqKey, fallbackWidgetDir: widgetDir, allowModalWindows: true)
 if !out.isEmpty {
     print(out)
 }
