@@ -632,9 +632,10 @@ export const updateState = (event, previousState) => {
   if (event.type === 'MOVE_TO_SCREEN') {
     const targetId = event.instanceId;
     const targetScreen = resolveActiveScreen(event.screenId || 'screen_1');
-    const updated = (previousState.instances || []).map((inst) => {
-      if (inst.id === targetId) {
-        return { ...inst, targetScreen, x: SNAP_MARGIN_X, y: SNAP_MARGIN_TOP };
+    const updated = (previousState.instances || []).map((inst, idx) => {
+      if (!targetId || inst.id === targetId) {
+        const offset = !targetId ? idx * 24 : 0;
+        return { ...inst, targetScreen, x: SNAP_MARGIN_X + offset, y: SNAP_MARGIN_TOP + offset };
       }
       return inst;
     });
@@ -643,9 +644,19 @@ export const updateState = (event, previousState) => {
       type: 'SYNC_INSTANCES',
       instances: updated,
     });
+    let nextHiddenPlus = previousState.hiddenPlusScreens || [];
+    if (!targetId && nextHiddenPlus.includes(targetScreen)) {
+      nextHiddenPlus = nextHiddenPlus.filter((s) => s !== targetScreen);
+      saveHiddenPlusScreens(nextHiddenPlus);
+      broadcastWidgetMessage('sticker', {
+        type: 'SYNC_HIDDEN_PLUS',
+        hiddenPlusScreens: nextHiddenPlus,
+      });
+    }
     return {
       ...previousState,
       instances: updated,
+      hiddenPlusScreens: nextHiddenPlus,
     };
   }
 
